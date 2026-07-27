@@ -1,0 +1,49 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local environments and caches
+.venv/
+venv/
+.cache/
+cache/
+
+# Runtime outputs
+data/
+exp/
+eval/
+output/
+outputs/
+checkpoints/
+runs/
+logs/
+wandb/
+tmp/
+tmp*/
+
+# Model weights and large generated artifacts
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.onnx
+*.npz
+*.npy
+*.mp4
+*.wav
+*.flac
+*.tar
+*.tar.gz
+*.zip
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,19 @@
+# VBench evaluation dependencies.
+# These are pulled in on top of an existing torch / cuda environment.
+# Install via: pip install -r requirements.txt
+vbench>=0.1.5
+# Below pulled in by vbench but pinning here for reproducibility:
+imageio>=2.34.0
+imageio-ffmpeg>=0.4.9
+decord>=0.6.0
+av>=10.0.0
+pyiqa>=0.1.10            # MUSIQ image quality
+ftfy>=6.1.1
+regex
+tqdm
+einops
+clip-anytorch>=2.5.2
+mmcv-lite>=2.1.0
+# Tools used to download VBench prompts / extra reference data
+requests>=2.31.0
+huggingface-hub>=0.23.0

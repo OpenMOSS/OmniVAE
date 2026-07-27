@@ -1,0 +1,191 @@
+experiment:
+  name: t2v_omnivae
+  # output_dir below is the parent / base directory; omnivae_generation.trainer.zimage_training
+  # ._sync_run_identity auto-appends experiment.name (or the --name override)
+  # as the leaf, and forces wandb.run_name to match. Single source of truth =
+  # experiment.name; never write the leaf manually.
+  output_dir: ./exp/t2v
+
+accelerate:
+  mixed_precision: bf16
+  log_with: tensorboard
+  dynamo_recompile_limit: 8
+  use_stateful_dataloader: true
+  stateful_snapshot_every_n_steps: 1
+
+wandb:
+  base_url: null
+  entity: null
+  project: omnivae-generation
+  # run_name is auto-synced to experiment.name by omnivae_generation.trainer.zimage_training._sync_run_identity
+
+profiler:
+  enabled: true
+  trace_dir: null
+  activities: [cpu, cuda]
+  record_shapes: false
+  profile_memory: false
+  with_stack: true
+  with_flops: false
+  with_modules: false
+  wait: 100
+  warmup: 1
+  active: 3
+  repeat: 1
+  skip_first: 0
+  all_ranks: false
+
+dataset:
+  type: video_jsonl
+  meta_path: data/video/train/video_caption.jsonl
+  jsonl_index_path: null
+  jsonl_path_field: video_path
+  jsonl_prompt_field: video_caption
+  jsonl_prompt_index_path: null
+  frame_size: [256, 256]
+  num_frames: 121
+  target_fps: 24.0
+  decode_backend: torchcodec
+  return_uint8: true
+  center_crop: true
+  random_flip: false
+  num_workers: 12
+  prefetch_factor: 4
+  pin_memory: true
+  drop_last: true
+  max_samples: null
+  cache_dir: null
+
+text_encoder:
+  model_name_or_path: Qwen/Qwen3.5-0.8B-Base
+  torch_dtype: bfloat16
+  attn_implementation: sdpa
+  disable_qwen3_5_fast_path: true
+  cache_enabled: false
+  compile_model: true
+  max_sequence_length: 512
+
+vae:
+  type: omnivae
+  model_name_or_path: checkpoints/omnivae/av_vae/state_dict.pt
+  branch: video
+  use_ema: false
+  torch_dtype: bfloat16
+  qk_norm: auto
+  compile_encode_fullgraph: false
+
+scheduler:
+  model_name_or_path: Tongyi-MAI/Z-Image-Turbo
+  subfolder: scheduler
+  use_dynamic_shifting: false
+
+transformer:
+  arch: zimage
+  init_from_transformer: null
+  all_patch_size: [1]
+  all_f_patch_size: [1]
+  in_channels: 48
+  dim: 1920
+  n_layers: 18
+  n_refiner_layers: 2
+  n_heads: 15
+  n_kv_heads: 15
+  norm_eps: 1.0e-5
+  qk_norm: true
+  rope_theta: 256.0
+  t_scale: 1000.0
+  use_timestep: true
+  predict_target: v
+  axes_dims: [16, 56, 56]
+  axes_lens: [1024, 512, 512]
+  compile_model: true
+  attention_backend: null
+
+train:
+  seed: 42
+  train_text_encoder: false
+  gradient_checkpointing: true
+  allow_tf32: true
+  per_device_batch_size: 2
+  gradient_accumulation_steps: 1
+  max_train_steps: 1000000
+  learning_rate: 1.0e-4
+  scale_lr: false
+  optimizer: hybrid
+  lr_scheduler: cosine
+  lr_warmup_steps: 2000
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_weight_decay: 0.01
+  adam_epsilon: 1.0e-8
+  muon_momentum: 0.95
+  muon_nesterov: true
+  muon_weight_decay: 0.01
+  muon_eps: 1.0e-8
+  muon_ns_steps: 5
+  muon_ns_coefficients: null
+  muon_adjust_lr_fn: match_rms_adamw
+  muon_shard_across_ranks: 8
+  muon_max_inflight_buckets: 1
+  max_grad_norm: 1.0
+  caption_dropout_prob: 0.1
+  weighting_scheme: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  mode_scale: 1.29
+  snapshot_checkpointing_steps: 5000
+  snapshots_total_limit: 5
+  persistent_checkpointing_steps: 50000
+  persistent_total_limit: null
+  validation_steps: 5000
+  validation_prompts:
+    - "A cinematic documentary shot of a three-dimensional topographical map, clouds drifting over islands, somber historical lighting."
+    - "A tense cinematic scene inside a dimly lit historical palace hall, guards rushing through a wooden corridor, dramatic torchlight."
+    - "A close-up cinematic drama shot of a young woman lit by cool blue light, anxious expression, soft early 2000s television style."
+    - "A cinematic wide shot of ocean waves rolling onto a sandy beach at sunset, realistic lighting, gentle camera movement."
+    - "A young woman laughing while chatting with a friend at a sunny outdoor cafe."
+    - "An old man telling a story to a group of children sitting around him in a park."
+    - "A street musician playing guitar and singing on a busy city sidewalk."
+    - "A golden retriever running across a grassy field on a bright afternoon."
+    - "Cherry blossoms gently falling along a quiet path in spring."
+    - "A bowl of steaming noodles on a wooden table in a cozy small restaurant."
+    - "Two old friends sitting across from each other in a dimly lit bar, talking quietly, two glasses of beer on the table."
+    - "A couple chatting and laughing while cooking together in the kitchen, warm yellow lighting."
+    - "A group of college students sitting around a long library table, whispering and discussing, flipping through their notes."
+    - "A mother crouching down to speak face-to-face with her young child, expression gentle and patient."
+    - "Two strangers sharing an umbrella in the rain, talking with awkward smiles."
+    - "An intense business meeting, several employees arguing around a glass conference room table, the city skyline visible through floor-to-ceiling windows."
+    - "A couple whispering to each other by a cafe window, snow falling on the winter street outside."
+    - "An elderly woman sitting in a rocking chair on the porch, chatting with a neighbor over the fence, sunlight filling the yard."
+    - "A middle-aged man facing the camera, lips slightly parted, eyebrows raised, as if he has just said something shocking, facial expression clearly visible, natural indoor lighting."
+    - "Two women sitting face to face, one speaking with animated hand gestures, the other tilting her head to listen intently, close-up shot, warm cafe lighting."
+    - "An elderly grandfather telling a story to his grandson, mouth wide open, eyes big and expressive, the grandson leaning in close, both faces clearly in focus."
+    - "A young man arguing with a friend, lips moving quickly, finger pointing, expression intense, close frontal shot, natural city street lighting."
+    - "A woman laughing while speaking with her hand over her mouth, smile lines at the corners of her eyes, the person across from her laughing too, both faces clearly in focus, afternoon sunlight."
+    - "A student standing at the front of a classroom answering a question, facing the camera, mouth open, expression earnest with a hint of nervousness, blurred blackboard behind."
+    - "A husband and wife talking across a dinner table, the wife speaking with tears in her eyes, the husband gazing at her, both faces gently lit by candlelight."
+    - "A little boy looking up and earnestly explaining something to an adult, mouth moving, brows furrowed, expression serious yet adorable, frontal close-up."
+    - "Two old friends sitting side by side on a park bench, one turning to speak to the other, corners of his mouth lifted, both the side profile and frontal face clearly visible."
+    - "A female actress on stage confiding in her co-star, facing toward the audience, lips trembling slightly, eyes glistening, expression full of emotional tension, stage spotlight on her face."
+  validation_negative_prompts:
+    - ""
+    - ""
+    - ""
+    - ""
+    - ""
+    - ""
+    - ""
+    - ""
+    - ""
+    - ""
+  validation_num_frames: 121
+  validation_frame_size: [256, 256]
+  validation_fps: 24.0
+  validation_num_inference_steps: 50
+  validation_guidance_scale: 4.0
+  validation_cfg_normalization: false
+  validation_cfg_truncation: 1.0
+  resume_from_checkpoint: latest
+  log_every_steps: 10
+  manual_gc: true
+  manual_gc_every_steps: 1000

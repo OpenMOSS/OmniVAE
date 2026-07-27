@@ -1,0 +1,311 @@
+# ============================================================================
+# Audio-Video VAE 联合训练配置 (文件路径模式 + Contrastive)
+#
+# 基于 audio_kl_0.5_video_kl_1e-4_lr_1e-4_with_contrastive.yaml
+# 区别：训练集使用 use_file_processor: true，jsonl 中直接存 video_path
+#
+# jsonl 格式示例：
+#   {"video_path": "/data/videos/001.mp4"}
+#   {"video_path": "/data/videos/002.mp4", "audio_path": "/data/audios/002.wav"}
+#   {"video_path": "/data/videos/003.mp4", "prompt": "A dog barking in the park"}
+# ============================================================================
+
+seed: 1234
+
+# ============================================================================
+# 共享参数 (使用 YAML anchors)
+# ============================================================================
+# 音频采样率 (Hz)
+audio_sample_rate: &audio_sample_rate 48000
+# 视频帧数
+# num_frames: &num_frames 17
+num_frames: &num_frames 129
+# 视频分辨率 (H, W)
+resolution: &resolution 256
+# 视频目标帧率 (fps)
+target_fps: &target_fps 24
+# 视频帧采样间隔 (1=每帧, 2=隔帧采样)
+video_frame_sample_rate: &video_frame_sample_rate 1
+
+# ============================================================================
+# 模型配置
+# ============================================================================
+model:
+  video:
+    model_name: WanVAE22
+    model_config: configs/model/wanvae22_48dim.json
+    pretrained_model_name_or_path: $OMNIVAE_CKPT_ROOT/audio_video_ckpt/Wan2.2-VAE/Wan2.2_VAE.pth
+
+  audio:
+    audio_sample_rate: *audio_sample_rate
+    sample_rate: *audio_sample_rate
+    encoder_dim: 128
+    encoder_rates: [2, 3, 4, 5, 8]
+    latent_dim: 128
+    decoder_dim: 2048
+    decoder_rates: [8, 5, 4, 3, 2]
+    n_codebooks: 9
+    codebook_size: 1024
+    codebook_dim: 8
+    quantizer_dropout: false
+    continuous: true
+    pretrained_model_name_or_path: $OMNIVAE_CKPT_ROOT/audio_video_ckpt/dac_vae_48khz/vae_128d_48k.pth
+
+  contrastive:
+    contrastive_use_mean: true
+    embed_dim: 512
+    segment_hidden_dim: 1024
+    global_hidden_dim: 1024
+    # segment_count supports a list for multi-granularity contrastive learning:
+    #   segment_count: [null, 8]       # two granularities: auto (=T) and 8 segments
+    #   num_negatives: [23, 15]        # per-granularity negatives
+    #   num_negative_videos: [63, 31]  # per-granularity negative videos
+    # Single value is backward compatible (treated as a single-element list internally).
+    segment_count: null
+    init_scale: 0.07
+    clamp_scale_min: 0.001
+    clamp_scale_max: 0.5
+    gather_for_loss: true
+    num_negatives: 23
+    num_negative_videos: 63
+    use_sdpa: true  # true: explicit F.scaled_dot_product_attention; false: standard nn.TransformerEncoderLayer
+    spatial_pool_mode: mean  # mean / max / attention_pool / transformer
+    spatial_merge_factor: 4    # merge k×k spatial tokens for contrastive head
+    transformer_dim: 768       # internal d_model for contrastive temporal transformers (aligned with Synchformer)
+    # transformer_layers: 1  # fallback for all stages (overridden by per-stage settings below)
+    spatial_transformer_layers: 1    # layers for spatial aggregation transformer
+    segment_transformer_layers: 1    # layers for segment temporal aggregation transformer
+    global_transformer_layers: 1     # layers for global temporal aggregation transformer
+
+  # Semantic Distillation Projectors (Qwen3-Omni encoder features as teacher)
+  # NOTE: *_target_dim must match the teacher layer's output dim.
+  #   - Vision blocks[k] output dim = 1152 (== last_hidden_state pre-merger)
+  #   - Audio layers[k] output dim  = 1280 (d_model; vs 2048 after final output_dim proj)
+  # So if distill_*_layer below is null (last layer), set audio_target_dim=2048;
+  # if distill_audio_layer is an intermediate layer, keep audio_target_dim=1280.
+  distill:
+    enabled: false
+    video_target_dim: 1152
+    image_target_dim: 1152
+    audio_target_dim: 1280
+    video_spatial_factor: 4
+    image_spatial_factor: 4
+    temporal_agg_ratio: 3          # VAE 6 latent/s ÷ encoder 2 token/s = 3:1
+    audio_distill_type: d_axis     # d_axis | t_axis
+    distill_proj_type: conv        # conv (iREPA, 默认) | linear (REPA)
+    distill_use_conv3d: false      # conv 模式: Conv3d (true) 或逐帧 Conv2d (false)
+    distill_proj_layers: 2         # conv 层数 (1=单层, 向后兼容)
+    distill_proj_hidden_dim: 256   # 多层隐藏维度 (null=自动 geometric mean)
+    distill_proj_before_agg: true  # true=先投影再时间聚合(新版), false=先聚合再投影(旧版)
+    distill_dim_schedule: fixed    # fixed=所有隐藏层同维(默认), doubling=逐层翻倍(层数自动)
+    distill_use_sampled: false     # false=用latent mean蒸馏(默认), true=用采样后的latent蒸馏
+    audio_proj_type: conv          # 音频投影: "linear" (默认) | "conv"
+    audio_proj_layers: 2           # 音频 conv 层数
+    audio_proj_hidden_dim: 512     # 音频隐藏维度
+
+# ============================================================================
+# 数据配置
+# ============================================================================
+data:
+  train:
+    # # === 方式一：层级式数据混合 yaml（推荐用于多数据集混合训练） ===
+    # # 指定后会忽略 metadata_paths 和 metadata_weights，自动解析权重
+    # data_mixture_yaml: $OMNIVAE_DATA_ROOT/data_v1_mixure.yaml
+
+    # === 方式二：手动指定数据集路径和权重 ===
+    metadata_paths:
+      # train_main: $OMNIVAE_DATA_ROOT/train
+      train_main: $OMNIVAE_DATA_ROOT/train
+    metadata_weights:
+      train_main: 1.0
+
+    # 启用文件路径处理器（直接从 video_path 加载，不使用 bin 打包）
+    use_file_processor: true
+
+    num_frames: *num_frames
+    resolution: *resolution
+    video_frame_sample_rate: *video_frame_sample_rate
+    target_fps: *target_fps
+    audio_sample_rate: *audio_sample_rate
+
+    num_workers: 4
+    prefetch_factor: 2
+
+  val_video:
+    # 二选一（jsonl_paths 优先于 video_dir）：
+    #   - jsonl_paths: 显式 {name: path} 字典或路径列表，明确指定要评测哪些 jsonl
+    #   - video_dir: 旧入口，扫目录下所有 *.jsonl 自动建数据集（每个 jsonl stem 作 ds_name）
+    # video_dir: $OMNIVAE_DATA_ROOT/val/video
+    jsonl_paths:
+      panda70m_test: $OMNIVAE_DATA_ROOT/val/video/panda70m-test.jsonl
+      ucf101_test: $OMNIVAE_DATA_ROOT/val/video/ucf101-test.jsonl
+    num_frames: 121
+    resolution: *resolution
+    video_frame_sample_rate: *video_frame_sample_rate
+    target_fps: *target_fps
+    max_samples: 1000
+    batch_size: 1
+
+  val_audio:
+    audio_dir: $OMNIVAE_DATA_ROOT/val/audio
+    audio_sample_rate: *audio_sample_rate
+    max_duration: 5.0
+    max_samples: 1000
+    batch_size: 1
+
+  val_contrastive:
+    jsonl_paths:
+      vggsound_valid: $OMNIVAE_DATA_ROOT/val/contrastive/vggsound_valid_filtered.jsonl
+      ct_nonspeech: $OMNIVAE_DATA_ROOT/val/contrastive/nonspeech_valid_10000.jsonl
+      ct_speech: $OMNIVAE_DATA_ROOT/val/contrastive/speech_valid_10000.jsonl
+    num_frames: *num_frames
+    resolution: *resolution
+    video_frame_sample_rate: *video_frame_sample_rate
+    target_fps: *target_fps
+    audio_sample_rate: *audio_sample_rate
+    max_samples: 20000
+    batch_size: 1
+    # 支持单值或列表（如 [64, 256]）；列表会分别独立评估
+    val_segment_num_negatives: [29, 64]
+    val_segment_num_negative_videos: ${model.contrastive.num_negative_videos}
+    val_global_num_negatives: [64, 256]
+
+# ============================================================================
+# 训练配置
+# ============================================================================
+training:
+  max_steps: 500000
+  batch_size: 3
+
+  lr: &lr 1.0e-5
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
+
+  max_grad_norm: 1.0
+  gradient_accumulation_steps: 1
+  dtype: fp32
+  # 逐模块 dtype（可选，不设则跟随全局 dtype）
+  video_vae_dtype: fp32
+  audio_vae_dtype: fp32
+  contrastive_dtype: bfloat16
+
+  # Video VAE gradient checkpointing（用额外计算换取显存节省）
+  gradient_checkpointing: false
+
+  # 是否在视频中随机选择起始位置进行裁剪（数据增强）
+  random_start: false
+
+  use_ema: false
+  ema_decay: 0.999
+
+  qk_norm: false
+
+  log_steps: 3
+  stdout_steps: 10
+  eval_steps: 2000
+  save_steps: 2000
+  max_checkpoints: 5000
+
+# ============================================================================
+# Loss 权重
+# ============================================================================
+loss:
+  # Loss 开关 (true=启用, false=禁用并跳过对应计算)
+  use_video_recon: true
+  use_audio_recon: true
+  use_segment_contrastive: true
+  use_global_contrastive: true
+
+  # 三大组权重 (在单项权重之上的整体缩放)
+  lambda_group_video: 1.0
+  lambda_group_audio: 1.0
+  lambda_group_contrastive: 1.0
+
+  # Video
+  lambda_video_recon: 1.0
+  lambda_video_kl: 1.65e-2  # 由于没有 lpips loss, 所以这边 kl loss 要调小点
+  lambda_video_lpips: 1.0   # 设为 >0（如 0.5 或 1.0）启用 LPIPS 训练损失
+  video_loss_reduction: "sum"  # "sum" (默认): sum over spatial, mean over batch; "mean": mean over all
+
+  # Audio
+  lambda_audio_mel: 1.0
+  # 复刻参考 RVQGAN 范式: wav_recon_loss_lambda=0, 波形 L1 关闭, 让 mel + adv + fm 主导
+  lambda_audio_recon: 0.0
+  lambda_audio_kl: 0.5
+
+  # Audio-Video Contrastive
+  lambda_segment_contrastive: 1.0
+  lambda_global_contrastive: 1.0
+  global_contrastive_start_steps: 0
+  # Multi-granularity segment contrastive settings (lists must match segment_count length):
+  #   segment_avclip_start_steps: [0, 1000]   # per-granularity training start step
+  #   segment_count_weights: [1.0, 0.5]       # per-granularity loss weight (summed then scaled by lambda_segment_contrastive)
+
+  # 自适应 loss 平衡（以 video_total 为锚点动态缩放 audio / contrastive）
+  adaptive_loss_balance: true
+  adaptive_balance_audio_ratio: 0.5
+  adaptive_balance_contrastive_ratio: 0.5
+
+  # Uncertainty-based adaptive loss balance (Kendall et al., 2018)
+  # 与 adaptive_loss_balance 互斥，同时开启会报错
+  adaptive_loss_balance_by_uncertainty: false
+  uncertainty_warmup_steps: 100  # warmup 步数，收集各任务 loss 均值后初始化 log(sigma^2)
+
+  # Semantic Distillation (Qwen3-Omni encoders as teacher)
+  # 三种模式 (优先级: semantic_model_path > semantic_api_url + upload_mode > semantic_api_url):
+  #   A. 本地推理: semantic_model_path 指向 Qwen3-Omni 权重目录
+  #   B. 远程共享路径: semantic_api_url 指向服务, 服务端直读文件 (需 NFS)
+  #   C. 远程上传: semantic_api_url + distill_upload_mode: true (跨服务器, 存储不共享)
+  use_semantic_distill: false
+  # semantic_model_path: /path/to/qwen3_avencoder_service  # 模式 A: 本地推理
+  # semantic_api_url: http://encoder-server:9000             # 模式 B/C: 远程服务
+  # distill_upload_mode: false           # true=模式C上传数据, false=模式B发路径
+  # distill_video_gpu_map: "0:0,1:0,2:1,3:1,4:2,5:2,6:3,7:3"  # rank->视频GPU映射
+  # distill_image_gpu_id: 4             # 图像推理 GPU (所有 rank 共用)
+  # distill_audio_gpu_id: 5             # 音频推理 GPU (所有 rank 共用)
+  # distill_num_upload_workers: 6       # 并行上传线程数
+  # distill_processor_path: /path/to/qwen3_omni_model  # Qwen processor 路径 (训练侧 tokenize)
+  encoder_fps: 4
+  encoder_resolution: 256
+  # Teacher encoder layer selection (Mode A / LocalSemanticEncoder only, 1-indexed).
+  # null = 最后一层 (旧行为，audio 输出 dim=2048);
+  # 给定 int 时截取该层 block 输出 (vision 共 27 层 → 1152 dim; audio 共 32 层 → 1280 dim).
+  # 注意与 model.distill.audio_target_dim 对齐。
+  distill_vision_layer: 18
+  distill_audio_layer: 24
+  lambda_distill_image_cosine: 1.0
+  lambda_distill_image_distance: 1.0
+  lambda_distill_video_cosine: 1.0
+  lambda_distill_video_distance: 1.0
+  lambda_distill_audio_d_axis: 120.0
+  lambda_distill_audio_t_axis: 1.0
+  distill_w_hyper: 0.1
+  distill_audio_type: d_axis       # d_axis | t_axis
+  lambda_group_distill: 1.0
+  # iREPA 空间归一化 (作用于 teacher 视觉特征)
+  distill_spatial_norm: true
+  distill_spatial_norm_gamma: 0.6
+  # loss 函数配置
+  distill_margin_cosine: 0.0        # 0 = iREPA/REPA 风格（直接负余弦）; >0 = marginal VF 风格
+  distill_margin_distance: 0.25
+  distill_use_dist_matrix: false    # 是否启用 Distance Matrix Loss
+  # 自适应蒸馏平衡（视频蒸馏对齐视频重建，音频蒸馏对齐音频重建）
+  adaptive_distill_balance: false
+  adaptive_distill_video_ratio: 0.1   # 视频蒸馏 / 视频重建 的目标比例
+  adaptive_distill_audio_ratio: 0.1   # 音频蒸馏 / 音频重建 的目标比例
+
+  mel_loss_kwargs:
+    sample_rate: *audio_sample_rate
+    n_mels: [5, 10, 20, 40, 80, 160, 320]
+    window_lengths: [32, 64, 128, 256, 512, 1024, 2048]
+    weights: [15, 15, 15, 15, 15, 15, 15]  # 每个尺度权重为 15
+    pow: 1.0
+    mel_fmin: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    mel_fmax: [null, null, null, null, null, null, null]
+
+# ============================================================================
+# 输出配置
+# 实际路径由 --tag 参数设置为 exp/{tag}/{log,checkpoints,tensorboard}
+# ============================================================================
+output:
+  exp_root: $OMNIVAE_EXP_ROOT

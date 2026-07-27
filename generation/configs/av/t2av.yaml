@@ -1,0 +1,540 @@
+# Joint Text-to-Audio-Video (T2AV) training config.
+#
+# Composes two pretrained Z-Image transformer branches (t2v + t2a) under a
+# bridge cross-attention stack. Bridges are zero-initialised so the model
+# starts byte-equivalent to the two independent branches and gradually
+# learns AV correspondence as training progresses.
+#
+# Launch with::
+#
+#   accelerate launch train_zimage_t2av.py --config configs/av/t2av.yaml
+#
+
+experiment:
+  name: t2av_omnivae
+  # output_dir below is the parent / base directory; trainer auto-appends
+  # experiment.name (or the --name override) as the leaf.
+  output_dir: ./exp/t2av
+
+accelerate:
+  mixed_precision: bf16
+  log_with: tensorboard
+  dynamo_recompile_limit: 16
+  # Required by the multi-source dataset.sources path below: the
+  # WeightedShuffledCycleStatefulSampler is stateful and only the
+  # StatefulDataLoader can snapshot its (cursors / pass_count /
+  # multinomial RNG) into accelerate's checkpoint blob so resume
+  # preserves the exact within-epoch sample order across all sources.
+  use_stateful_dataloader: true
+  stateful_snapshot_every_n_steps: 1
+
+wandb:
+  base_url: null
+  entity: null
+  project: omnivae-generation
+  # run_name is auto-synced to experiment.name
+
+profiler:
+  enabled: false
+  trace_dir: null
+  activities: [cpu, cuda]
+  record_shapes: false
+  profile_memory: false
+  with_stack: true
+  with_flops: false
+  with_modules: false
+  wait: 100
+  warmup: 1
+  active: 3
+  repeat: 1
+  skip_first: 0
+  all_ranks: false
+
+# ----- Paired AV dataset (video + audio drawn from the SAME mp4) ----- #
+#
+# Two yaml schemas are supported here (mutually exclusive):
+#
+#   1. Legacy single-source (current default below):
+#        dataset.jsonl_path  + dataset.path_field + dataset.prompt_field
+#        Behaviour is byte-for-byte identical to the pre-multi-source
+#        code path; uses a plain torch DataLoader + accelerate's default
+#        distributed sharding. No stateful resume of within-epoch order.
+#
+#   2. Multi-source weighted (uncomment the ``sources:`` block below to
+#      switch on). Each source has its own jsonl path + field names + a
+#      ``weight``; cross-source draws use a multinomial RNG so the
+#      training distribution follows the weight ratios. Per-source draws
+#      use shuffle-on-exhaust (no replacement until the source is fully
+#      consumed, then reshuffle). The whole sampler is stateful so
+#      resume preserves the exact within-epoch order. Required:
+#        accelerate.use_stateful_dataloader: true
+#        torchdata >= 0.8.0 (already a trainer dep)
+#
+# Example multi-source spec:
+#
+#   dataset:
+#     type: av_paired_jsonl
+#     sources:
+#       - name: av_caption_main
+#         path: /path/to/av_caption_24M.jsonl
+#         path_field: video_path
+#         prompt_field: av_caption
+#         weight: 1.0
+#       - name: vabench_train
+#         path: /path/to/vabench_train.jsonl
+#         path_field: mp4_path
+#         prompt_field: caption_en
+#         weight: 0.3
+#     # global decoding / alignment knobs apply to every source:
+#     frame_size: [256, 256]
+#     num_frames: 121
+#     ...
+#
+# Per-sample provenance: each batch carries ``source_indices`` /
+# ``source_names`` so per-source loss / wandb panels are easy to
+# wire up downstream if you want them.
+dataset:
+  type: av_paired_jsonl
+  # Default jsonl field names used by every source unless the source
+  # itself overrides them (all four shards below follow the av_caption
+  # schema, so no per-source override is needed).
+  path_field: video_path                # av_caption jsonl: mp4 path is in `video_path`
+  prompt_field: av_caption              # av_caption jsonl: caption(s) live in `av_caption`
+  # ----- Multi-source weighted mixture ----- #
+  # Cross-source draws use ``Categorical(weights / sum(weights))`` (with
+  # replacement); per-source draws use shuffle-on-exhaust (no
+  # replacement until the source is fully consumed, then reshuffle and
+  # cycle). Weights are *relative* and need not sum to 1 -- the
+  # multinomial sampler normalizes internally. So the long-run mix
+  # below works out to (in % of training examples seen):
+  #   nonspeech_1000w_g2 : 0.50 / 0.76 ~= 65.8%
+  #   documentary        : 0.15 / 0.76 ~= 19.7%
+  #   movies             : 0.08 / 0.76 ~= 10.5%
+  #   chinese_drama      : 0.03 / 0.76 ~=  3.9%
+  # Each batch carries ``source_indices`` / ``source_names`` so per-
+  # source loss / wandb panels are easy to wire up downstream.
+  sources:
+    - name: nonspeech_1000w_g2
+      path: data/av/train/nonspeech.jsonl
+      weight: 0.50
+    - name: speech_1000w_g2
+      path: data/av/train/speech.jsonl
+      weight: 0.35
+    - name: documentary
+      path: data/av/train/documentary.jsonl
+      weight: 0.12
+    - name: movies
+      path: data/av/train/movies.jsonl
+      weight: 0.05
+    - name: chinese_drama
+      path: data/av/train/chinese_drama.jsonl
+      weight: 0.03
+  # ----- Video knobs (mirror omnivae_generation.trainer.video_data.VideoJsonlDataset) ----- #
+  frame_size: [256, 256]
+  num_frames: 121                       # 121 frames @ 24 fps -> 5.0417s clip; 31 latent frames after Wan2.2 temporal-VAE (scale=4)
+  target_fps: 24.0
+  center_crop: true
+  random_flip: false
+  return_uint8: true
+  # ----- Audio knobs (mirror omnivae_generation.trainer.audio_data.AudioJsonlT2ADataset) ----- #
+  # 121 frames @ 24 fps = 5.04167 s; 5.04167 * 48000 = 242000 samples (exact)
+  # so video and audio cover the same time window byte-aligned to the frame grid.
+  sample_rate: 48000
+  num_audio_samples: 242000             # == 121 * 48000 / 24, matches the 121-frame video clip
+  mono: true
+  append_duration_suffix: false
+  duration_precision: 1
+  # Wrap every caption with one of ten randomly-picked T2AV instruction
+  # templates (see ``omnivae_generation.trainer.audio_task_prefix.T2AV_TEMPLATES``) so the
+  # frozen Qwen3.5 text encoder produces an embedding distribution
+  # clearly distinct from the per-branch TTS / TTA / t2v warm-starts
+  # and tells the bridge cross-attention "synthesize video AND audio".
+  task_prefix_enabled: true
+  # ----- Strict AV alignment ----- #
+  # Both modalities are decoded from [0, num_frames / target_fps] of the
+  # same mp4 (the dataset deliberately ignores any legacy
+  # entry["start_time"] / "end_time" fields). Clips whose mp4 header
+  # advertises a duration shorter than ``ratio * (num_frames /
+  # target_fps)`` are treated as bad samples and skipped, so the bridge
+  # cross-attention never sees an asymmetrically-padded AV pair.
+  # 0.99 -> within 1% of the requested 5.0417s window. Set to 0 to
+  # disable the check (matches legacy tta-from-video behaviour).
+  min_clip_duration_ratio: 0.99
+  # ----- Dataloader ----- #
+  # Memory-pressure tuning (the AV path is 2-3x heavier than t2v / t2a
+  # because each sample carries both a 121-frame uint8 video tensor
+  # ~24 MB and a 5s float32 waveform ~1 MB, AND each __getitem__ opens
+  # 2 native torchcodec decoders). With ``persistent_workers: true``
+  # the worker RSS climbs slowly under ffmpeg's native allocator;
+  # the previous (12, 4) setting let a single rank's IPC prefetch
+  # buffer hit ~2.4 GB, and 8 ranks per node + ffmpeg's 8 glibc arenas
+  # tipped the host into OOM-killer territory after ~10 h of training.
+  # (6, 2) keeps 6 workers * 2 prefetch * batch=2 * ~25 MB ≈ 600 MB
+  # per rank IPC, with plenty of headroom for the 2.07 s/step cadence.
+  # If GPU is starved, raise back to (8, 2) before increasing workers
+  # past 8.
+  num_workers: 6
+  prefetch_factor: 2
+  pin_memory: true
+  drop_last: true
+  max_samples: null
+
+text_encoder:                           # identical to configs/visual/t2v.yaml
+  model_name_or_path: Qwen/Qwen3.5-0.8B-Base
+  torch_dtype: bfloat16
+  attn_implementation: sdpa
+  disable_qwen3_5_fast_path: true
+  cache_enabled: false
+  compile_model: true
+  max_sequence_length: 512
+
+vae:
+  type: omnivae
+  model_name_or_path: checkpoints/omnivae/av_vae/state_dict.pt
+  branch: video
+  use_ema: false
+  torch_dtype: bfloat16
+  qk_norm: auto
+  compile_encode_fullgraph: false
+  compile_encode: true
+
+audio_vae:
+  type: omnivae
+  model_path: checkpoints/omnivae/av_vae/state_dict.pt
+  branch: audio
+  use_ema: false
+  hop_length: 960
+  latent_channels: 128
+  torch_dtype: float32
+  compile_encode: true
+
+scheduler:
+  model_name_or_path: Tongyi-MAI/Z-Image-Turbo
+  subfolder: scheduler
+  local_files_only: true
+  use_dynamic_shifting: false
+
+# ----- Joint-AV bridge knobs ----- #
+# `transformer.*` here only carries the joint-level wiring; the per-branch
+# transformer configs live under `transformer_video` / `transformer_audio`
+# below. Both branches share head_dim/dim/n_heads (15 heads * 128 head_dim
+# == 1920) which is what the bridge cross-attention also uses.
+transformer:
+  all_patch_size: [1]                   # used by the entry script to read the unified patch size
+  all_f_patch_size: [1]
+  bridge_interval: 1                    # insert a bridge after every main block (refiners excluded)
+  bridge_enabled: true
+  use_asymmetric_ati: false             # symmetric A2V + V2A by default
+  a2v_window_size: 1                    # only consulted when use_asymmetric_ati=true
+  attention_backend: null
+  # ----- torch.compile knobs (applied per-block on both branches) ----- #
+  # Compile is applied to each main block / refiner / bridge block's
+  # forward separately (NOT to the joint forward as a whole) so the
+  # data-dependent control flow in `_run_main_blocks_with_bridges` stays
+  # in eager. Override individually if you hit dynamo issues.
+  compile_bridges: true                 # compile each BridgeBlock.forward
+  # ``compile_mode`` MUST stay at "default" for this code path. Why:
+  #
+  # We compile each block individually (53 sites: 18 main x 2 + 4
+  # refiners x 2 + 9 bridges) because the joint forward has data-
+  # dependent control flow (modality skip, bridge scatter-add) that
+  # fights ``fullgraph=True``. With this many sites, "reduce-overhead"
+  # (CUDA graphs) hits multiple traps that empirically negate or even
+  # reverse the speedup:
+  #
+  # * Fast-path miss: 53 sites in one step trigger "Unable to hit fast
+  #   path of CUDAGraphs because of pending, uninvoked backwards"
+  #   unless we manually call ``cudagraph_mark_step_begin()`` every
+  #   micro-batch (the entry script does this conditionally).
+  # * Mutated inputs: scatter_add into the unified tensor before the
+  #   next layer reads it counts as input mutation -> several sites
+  #   silently get downgraded with "skipping cudagraphs due to mutated
+  #   inputs".
+  # * Dynamic shapes: text encoder output length varies with caption
+  #   token count -> cudagraph_trees records a fresh graph per shape
+  #   (~9 distinct sizes observed), spending hundreds of ms re-recording
+  #   and ballooning VRAM.
+  # * Crashes with grad ckpt: backward replays the forward through
+  #   compile sites without a step marker -> "accessing tensor output
+  #   of CUDAGraphs that has been overwritten." Entry script raises a
+  #   ValueError on this combination.
+  #
+  # "default" mode skips the cudagraph layer entirely and just uses
+  # Inductor codegen, which is fully training-safe and gives ~1.3x over
+  # eager. "max-autotune-no-cudagraphs" goes further: same cudagraph-
+  # free safety but with aggressive triton kernel autotuning ->
+  # ~1.4-1.5x over eager. Cost: first step compile takes 30-50 min for
+  # all 53 sites (vs 5-10 min for "default"), since each kernel
+  # template gets benchmarked. After that, every step is faster
+  # forever. Worth it for 50k+ step runs.
+  #
+  # Allowed values:
+  #   default                       - safe baseline, fastest first step
+  #   max-autotune-no-cudagraphs    - safe, slower compile, faster steps
+  #   reduce-overhead               - fragile here, see traps above
+  #   max-autotune                  - same traps as reduce-overhead
+  compile_mode: default
+  compile_fullgraph: false              # safer default; flip true once stable
+  compile_dynamic: null                 # null=auto; true/false to force
+
+transformer_video:
+  arch: zimage
+  init_from_transformer: null
+  all_patch_size: [1]
+  all_f_patch_size: [1]
+  in_channels: 48
+  dim: 1920
+  n_layers: 18
+  n_refiner_layers: 2
+  n_heads: 15
+  n_kv_heads: 15
+  norm_eps: 1.0e-5
+  qk_norm: true
+  rope_theta: 256.0
+  t_scale: 1000.0
+  use_timestep: true
+  predict_target: v
+  axes_dims: [16, 56, 56]
+  axes_lens: [1024, 512, 512]
+  compile_model: true                   # per-block compile (see transformer.compile_*)
+  attention_backend: null
+
+transformer_audio:
+  arch: zimage
+  init_from_transformer: null
+  all_patch_size: [1]
+  all_f_patch_size: [1]
+  in_channels: 128
+  dim: 1920
+  n_layers: 18
+  n_refiner_layers: 2
+  n_heads: 15
+  n_kv_heads: 15
+  norm_eps: 1.0e-5
+  qk_norm: true
+  rope_theta: 256.0
+  t_scale: 1000.0
+  use_timestep: true
+  predict_target: v
+  axes_dims: [16, 56, 56]
+  axes_lens: [2048, 16, 16]
+  compile_model: true                   # per-block compile (see transformer.compile_*)
+  attention_backend: null
+
+train:
+  seed: 42
+  train_text_encoder: false
+  gradient_checkpointing: true
+  allow_tf32: true
+  per_device_batch_size: 2
+  gradient_accumulation_steps: 1
+  max_train_steps: 500000
+
+  # ----- Heterogeneous learning rates ----- #
+  # backbone == video.* + audio.* (the two pretrained ZImage branches),
+  # bridge   == bridges.*         (cross-attention + AdaLN, zero-init)
+  backbone_lr: 3.0e-5
+  bridge_lr: 6.0e-5
+  learning_rate: 3.0e-5                 # mirrors backbone_lr; used as the LambdaLR base
+  scale_lr: false
+
+  optimizer: hybrid_tagged              # routed to HybridMuonAdamwTagged
+  lr_scheduler: cosine
+  lr_warmup_steps: 1000
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_weight_decay: 0.01
+  adam_epsilon: 1.0e-8
+  exclude_norm_and_bias_from_wd: true
+  exclude_embedding_from_wd: true
+  muon_momentum: 0.95
+  muon_nesterov: true
+  muon_weight_decay: 0.01
+  muon_eps: 1.0e-8
+  muon_ns_steps: 5
+  muon_ns_coefficients: null
+  muon_adjust_lr_fn: match_rms_adamw
+  muon_shard_across_ranks: 8            # shard Muon Newton-Schulz across 8 ranks (matches t2v); 1=disable, 0=all-ranks
+  muon_max_inflight_buckets: 1
+  max_grad_norm: 1.0
+  caption_dropout_prob: 0.1
+
+  # Per-sample bridge dropout. With probability ``bridge_dropout_prob``
+  # we zero out the bridge cross-modal delta for that sample during
+  # training, which is independent from caption dropout. This aligns the
+  # training distribution with the BridgeDiT-style dual-CFG inference
+  # path (NFE=3) that explicitly evaluates a "bridge=off" slot. Set to
+  # 0.0 to recover the legacy behaviour. 0 <= prob < 1.
+  bridge_dropout_prob: 0.1
+
+  # ----- Dual sigma shift (per-modality) ----- #
+  # NOTE: The single-modality t2v / t2a runs both inherit shift=3.0 from
+  # `Tongyi-MAI/Z-Image-Turbo/scheduler` (their YAMLs don't override
+  # `scheduler.shift`). Setting shift_v=5.0 / shift_a=1.0 here therefore
+  # *deliberately* drifts each branch's sigma distribution off its
+  # warm-start distribution -- video gets pushed toward more high-noise
+  # mass (helps long-horizon temporal coherence), audio recovers the
+  # identity schedule (closer to vanilla logit-normal). The bridges
+  # remain zero-init so the very first joint forward is still equal to
+  # the per-branch forwards, but the per-branch sigma sampling itself
+  # diverges from the warm-start regime starting at step 0.
+  shift_v: 5.0
+  shift_a: 3.0
+  loss_weight_v: 1.0
+  loss_weight_a: 1.0
+
+  # ----- Density / weighting (shared by both branches) ----- #
+  weighting_scheme: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  mode_scale: 1.29
+
+  # ----- Checkpointing ----- #
+  snapshot_checkpointing_steps: 5000
+  snapshots_total_limit: 1000
+  persistent_checkpointing_steps: 50000
+  persistent_total_limit: null
+  validation_steps: 5000
+  # ``validation_force_steps`` triggers a one-shot validation at every
+  # listed step regardless of the periodic ``validation_steps`` cadence.
+  # Useful for sanity checks at specific step boundaries.
+  #
+  # Step 0 is special: it fires a pre-train-loop validation on the
+  # warm-start weights BEFORE any optimizer step has run, which is the
+  # standard "does the pipeline + warm-start ckpt actually work?" smoke
+  # test. Step >= 1 fires after the matching backward + optimizer step.
+  #
+  # Equivalent CLI:
+  #   bash scripts/av/train.sh ... --validate_at 0,1,500,1000
+  # CLI values are merged with this list (set-union, then sorted).
+  validation_force_steps: []
+
+  resume_from_checkpoint: latest
+  log_every_steps: 10
+  manual_gc: true
+  manual_gc_every_steps: 1000
+
+# ----- Three-mode validation (joint AV / video only / audio only) ----- #
+# Each mode draws prompts from its own source so the validation prompt
+# distribution matches the training distribution that branch was warm-
+# started from:
+#
+#   joint_av    -> external compass jsonl (av_caption field)
+#                  duration suffix appended (matches AVPairedJsonlDataset)
+#   video_only  -> inline t2v prompt list (mirrors configs/visual/t2v.yaml)
+#                  no task prefix, no duration suffix (matches t2v training)
+#   audio_only  -> mix of TTS (basetts) + TTA (general_en) jsonls,
+#                  task prefix applied per-kind + duration suffix appended
+#                  (matches t2a single-modality training distribution).
+#                  WER scoring is intentionally skipped here -- joint AV
+#                  validation is qualitative only.
+validation:
+  # Order matters: validation iterates `modes` sequentially, so cheaper /
+  # less expensive modes run first and you get partial wandb logs even
+  # if a later mode crashes or runs out of time. Current order:
+  #   audio_only  -> TTS (basetts_valid) then TTA (tta_general_en)
+  #                  (~8 + ~10 = 18 prompts, audio-only DiT, fastest)
+  #   video_only  -> 10 inline t2v prompts (video-only DiT, medium)
+  #   joint_av    -> 501 paired AV prompts (full bridge stack, slowest)
+  modes: [audio_only, video_only, joint_av]
+
+  # ``max_examples`` (per-task) is the upper bound on how many prompts we
+  # actually run from each source. Convention:
+  #   max_examples: <int>   -> take the first N entries
+  #   max_examples: null    -> take everything in the source
+  #   max_examples: 0       -> same as null (no cap)
+  # Legacy alias ``max_prompts`` is still recognised by the loader.
+
+  # ---- joint_av: compass-style AV captions ---- #
+  # NOTE: full compass file is 501 entries; null means "run all 501". This
+  # is expensive (501 * 50 inference steps * (video+audio) per call), so
+  # cap it (e.g. 8/16) if you only need a smoke test per validation pass.
+  joint_av_prompts:
+    name: versebench
+    jsonl_path: examples/eval/t2av_versebench_sample.jsonl
+    text_field: av_caption
+    type_field: type
+    index_field: index
+    task_kind: t2av                     # apply_task_prefix("t2av", text) -> mirrors AVPairedJsonlDataset
+    append_duration_suffix: false        # matches AVPairedJsonlDataset
+    max_examples: null                  # run every entry in the jsonl
+    
+  # ---- video_only: t2v.yaml validation_prompts ---- #
+  video_only_prompts:
+    name: t2v_inline
+    max_examples: null                  # run every prompt below
+    prompts:
+      - "A cinematic documentary shot of a three-dimensional topographical map, clouds drifting over islands, somber historical lighting."
+      - "A tense cinematic scene inside a dimly lit historical palace hall, guards rushing through a wooden corridor, dramatic torchlight."
+      - "A close-up cinematic drama shot of a young woman lit by cool blue light, anxious expression, soft early 2000s television style."
+      - "A cinematic wide shot of ocean waves rolling onto a sandy beach at sunset, realistic lighting, gentle camera movement."
+      - "A young woman laughing while chatting with a friend at a sunny outdoor cafe."
+      - "An old man telling a story to a group of children sitting around him in a park."
+      - "A street musician playing guitar and singing on a busy city sidewalk."
+      - "A golden retriever running across a grassy field on a bright afternoon."
+      - "Cherry blossoms gently falling along a quiet path in spring."
+      - "A bowl of steaming noodles on a wooden table in a cozy small restaurant."
+
+  # ---- audio_only: TTS + TTA mix from t2a.yaml ---- #
+  audio_only_prompt_sets:
+    - name: basetts_valid
+      task_kind: tts                    # apply_task_prefix("tts", text)
+      jsonl_path: examples/eval/t2a_tts_basetts_sample.jsonl
+      text_field: text
+      type_field: type
+      index_field: index
+      append_duration_suffix: true
+      duration_precision: 1
+      max_examples: 8                   # TTS: cap at 8 (basetts_valid has ~140 entries)
+    - name: tta_general_en
+      task_kind: tta                    # apply_task_prefix("tta", text)
+      jsonl_path: examples/eval/t2a_tta_general_en.jsonl
+      text_field: text
+      type_field: type
+      index_field: index
+      append_duration_suffix: true
+      duration_precision: 1
+      max_examples: null                # TTA: run every entry (tta_general_en is ~10 lines)
+
+  num_inference_steps: 50
+  video_guidance_scale: 4.0
+  audio_guidance_scale: 4.0
+  cfg_normalization: false
+  # Per-source cap on how many samples we push to wandb / tensorboard.
+  # The full set still gets decoded + saved to disk + listed in
+  # manifest.json -- this just bounds the upload payload so e.g.
+  # joint_av at 501 prompts doesn't flood the wandb panel.
+  # Counted INDEPENDENTLY for each source, i.e. 10 for basetts_valid,
+  # 10 for tta_general_en, 10 for video, 10 for compass_valid.
+  # null / 0 disables (= upload everything decoded).
+  max_wandb_samples_per_source: 10
+
+  # ---- CFG variants ---- #
+  # Both simple (NFE=2, current behaviour) and dual (NFE=3, BridgeDiT
+  # Eq.6) variants are evaluated each step in joint_av mode. Outputs
+  # are split into ``samples/step-XXXX/<mode>/cfg_simple/`` and
+  # ``cfg_dual/`` subdirectories for direct A/B comparison; wandb /
+  # tensorboard tags also carry the cfg_mode suffix. Single-modality
+  # modes (video_only / audio_only) ignore the dual entry because the
+  # bridge has no opposite-modality KV to gate.
+  cfg_modes: [simple, dual]
+
+  # Dual CFG knobs (BridgeDiT Eq.6); only consulted when "dual" is in
+  # cfg_modes. Each branch decouples ``s_text`` (prompt adherence) from
+  # ``s_modality`` (cross-modal alignment / AV sync). Defaults mirror
+  # video_/audio_guidance_scale so the dual CFG starts at roughly the
+  # same total strength as simple CFG; raise s_modality to push AV
+  # sync, raise s_text to push prompt fidelity. LTX-2's recipe sits
+  # closer to (s_text=3, s_modality=3) for video and (s_text=7,
+  # s_modality=3) for audio -- worth experimenting with.
+  video_text_guidance: 4.0
+  video_modality_guidance: 4.0
+  audio_text_guidance: 4.0
+  audio_modality_guidance: 4.0
+
+  # Video-side validation knobs (mirror training: 121 frames @ 24 fps == 5.04 s)
+  video_frame_size: [256, 256]
+  video_num_frames: 121
+  video_fps: 24.0
+  # Audio-side validation knobs (5.04 s, matches the video clip length above)
+  audio_duration_seconds: 5.0417

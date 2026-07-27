@@ -1,0 +1,2 @@
+"""Inference entrypoints for OmniVAE."""
+

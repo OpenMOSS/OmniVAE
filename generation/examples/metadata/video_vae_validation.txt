@@ -1,0 +1,2 @@
+# One video path per line for optional visual VAE reconstruction validation.
+# Replace this file with your own path list before enabling vae_validation.

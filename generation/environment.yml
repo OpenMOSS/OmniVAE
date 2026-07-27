@@ -1,0 +1,13 @@
+name: omnivae-generation
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - ffmpeg
+  - pip:
+      - -r requirements.txt
+      - -r requirements_audio.txt
+      - -e .

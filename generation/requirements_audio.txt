@@ -1,0 +1,8 @@
+einops
+imageio[ffmpeg]
+funasr
+zhconv
+modelscope
+librosa
+jiwer
+zhon

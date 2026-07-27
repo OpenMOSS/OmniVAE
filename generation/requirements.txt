@@ -1,0 +1,13 @@
+accelerate>=1.13.0
+descript-audiotools
+diffusers>=0.37.0
+transformers==5.3.0
+torch>=2.10.0,<2.11.0
+torchaudio>=2.10.0,<2.11.0
+torchcodec>=0.10.0,<0.11.0
+torchdata>=0.8.0
+torchvision>=0.25.0,<0.26.0
+torch-fidelity>=0.4.0
+Pillow
+PyYAML
+safetensors

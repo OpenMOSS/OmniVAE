@@ -1,0 +1,482 @@
+# ============================================================================
+# Audio-Video VAE 联合训练配置 (文件路径模式 + Contrastive)
+#
+# 基于 audio_kl_0.5_video_kl_1e-4_lr_1e-4_with_contrastive.yaml
+# 区别：训练集使用 use_file_processor: true，jsonl 中直接存 video_path
+#
+# jsonl 格式示例：
+#   {"video_path": "/data/videos/001.mp4"}
+#   {"video_path": "/data/videos/002.mp4", "audio_path": "/data/audios/002.wav"}
+#   {"video_path": "/data/videos/003.mp4", "prompt": "A dog barking in the park"}
+# ============================================================================
+
+seed: 1234
+
+# ============================================================================
+# 共享参数 (使用 YAML anchors)
+# ============================================================================
+# 音频采样率 (Hz)
+audio_sample_rate: &audio_sample_rate 48000
+# 视频帧数
+# num_frames: &num_frames 17
+num_frames: &num_frames 121
+# 视频分辨率 (H, W)
+resolution: &resolution 256
+# 视频目标帧率 (fps)
+target_fps: &target_fps 24
+# 视频帧采样间隔 (1=每帧, 2=隔帧采样)
+video_frame_sample_rate: &video_frame_sample_rate 1
+
+# ============================================================================
+# 模型配置
+# ============================================================================
+model:
+  video:
+    model_name: WanVAE22
+    model_config: configs/model/wanvae22_48dim.json
+    pretrained_model_name_or_path: $OMNIVAE_CKPT_ROOT/audio_video_ckpt/Wan2.2-VAE/Wan2.2_VAE.pth
+
+  audio:
+    audio_sample_rate: *audio_sample_rate
+    sample_rate: *audio_sample_rate
+    encoder_dim: 128
+    encoder_rates: [2, 3, 4, 5, 8]
+    latent_dim: 128
+    decoder_dim: 2048
+    decoder_rates: [8, 5, 4, 3, 2]
+    n_codebooks: 9
+    codebook_size: 1024
+    codebook_dim: 8
+    quantizer_dropout: false
+    continuous: true
+    pretrained_model_name_or_path: $OMNIVAE_CKPT_ROOT/audio_video_ckpt/dac_vae_48khz/vae_128d_48k.pth
+
+  contrastive:
+    # contrastive_type: latent_seg | intra_seg_xattn
+    #   - latent_seg  (default): 先空间池化再时间分段池化，每段单向量做 InfoNCE
+    #   - intra_seg_xattn     : 段内保留所有 token，CLS + self-attn + cross-attn
+    #                            (ALBEF-style) 交互后取 CLS 做 InfoNCE
+    #   切换为 intra_seg_xattn 时，下面的 spatial_pool_mode / segment_*_transformer_layers
+    #   / transformer_dim / global_* 等 latent_seg 专属字段会被忽略（仅打日志）
+    #   intra_seg_xattn 专属参数见本段末尾注释。
+    contrastive_type: latent_seg
+    contrastive_use_mean: true
+    # Scale on gradient flowing from contrastive head back into the shared
+    # encoders. 1.0 = unchanged, 0.0 = stop-grad equivalent. Useful to prevent
+    # the contrastive head from destabilising the VAE latent distribution.
+    contrastive_grad_scale_video: 1.0
+    contrastive_grad_scale_audio: 1.0
+    embed_dim: 512
+    segment_hidden_dim: 1024
+    global_hidden_dim: 1024
+    # segment_count supports a list for multi-granularity contrastive learning:
+    #   segment_count: [null, 8]       # two granularities: auto (=T) and 8 segments
+    #   num_negatives: [23, 15]        # per-granularity negatives
+    #   num_negative_videos: [63, 31]  # per-granularity negative videos
+    # Single value is backward compatible (treated as a single-element list internally).
+    segment_count: null
+    init_scale: 0.07
+    clamp_scale_min: 0.001
+    clamp_scale_max: 0.5
+    gather_for_loss: true
+    num_negatives: 23
+    num_negative_videos: 63
+    # Sibling-aware negative sampling (for data pre-organized by reorg_jsonl.py
+    # so that batches contain multiple short clips from the same long video):
+    #   same_long_video_priority=true 时，每个 anchor 先从 batch pool 里同
+    #   long_video_id 的 segments 随机抽 K_seg 个作为 hard negatives，剩余
+    #   从跨长视频池补齐。
+    #
+    # Per-row variable negative budget (effective column count per anchor):
+    #   * 有 sibling 的行：使用 `num_negatives_with_sibling` 列（推导值或显式）
+    #     = (S-1) intra + 最多 K_seg sibling + 剩余 far。
+    #   * 没有 sibling 的行：退化到 `num_negatives` 列
+    #     = (S-1) intra + 剩余 far（等效于关闭 sibling 优先）。
+    #   两种行共用同一张 (n_local, C_max) 的 sim 张量，尾部多余列在 CE 前被
+    #   masked_fill(-inf)，因此不影响有效列数。
+    #
+    # 这三项都支持 list（每粒度一个值）或单值（广播）。
+    same_long_video_priority: false
+    same_long_video_num_negatives: 8      # K_seg
+    num_negatives_with_sibling: null      # null = 等于 num_negatives；显式设置时 >= num_negatives
+    use_sdpa: true  # true: explicit F.scaled_dot_product_attention; false: standard nn.TransformerEncoderLayer
+    spatial_pool_mode: mean  # mean / max / attention_pool / transformer
+    spatial_merge_factor: 4    # merge k×k spatial tokens for contrastive head
+    transformer_dim: 768       # internal d_model for contrastive temporal transformers (aligned with Synchformer)
+    # transformer_layers: 1  # fallback for all stages (overridden by per-stage settings below)
+    spatial_transformer_layers: 1    # layers for spatial aggregation transformer
+    segment_transformer_layers: 1    # layers for segment temporal aggregation transformer
+    global_transformer_layers: 1     # layers for global temporal aggregation transformer
+
+    # ========== intra_seg_xattn 专有参数（仅当 contrastive_type=intra_seg_xattn 生效） ==========
+    # 段切分方式: S = T_video_latent, audio 段 tokens 由 L_audio_latent // S 均分（截尾）。
+    # 位置编码:  audio 段内 1D sinusoidal + video 段内 2D sinusoidal（行列各 d/2，固定，不可学）。
+    # 交互方式:  双塔各 L_s 层 self-attn -> 对侧 KV 固定为 self-attn 后序列 -> 双塔各 L_x 层 cross-attn -> 取 CLS。
+    # 注意: embed_dim 需要整除 4 且整除 nhead。
+    # embed_dim: 512
+    # nhead: 8
+    # self_attn_layers: 2           # 两侧各 L_s 层 self-attn
+    # cross_attn_layers: 2          # 两侧各 L_x 层 cross-attn
+    # spatial_merge_factor: 2       # video 段内 (H/k)*(W/k) 个空间 token
+    # max_spatial_h: 64             # 2D PE 表上限（原始 H，不是 H/k）
+    # max_spatial_w: 64
+    # max_audio_tokens_per_seg: 32  # 每段 audio token 数上限（1D PE 表大小）
+    # dim_feedforward: null         # null -> 4*embed_dim
+    # dropout: 0.0
+    # qk_norm: false
+    # # 下列 negative sampling 与 latent_seg 通用（单粒度），可复用上方同名字段：
+    # # num_negatives / num_negative_videos / same_long_video_priority
+    # # same_long_video_num_negatives / num_negatives_with_sibling
+
+  # Semantic Distillation Projectors (Qwen3-Omni encoder features as teacher)
+  # NOTE: *_target_dim must match the teacher layer's output dim.
+  #   - Vision blocks[k] output dim = 1152 (== last_hidden_state pre-merger)
+  #   - Audio layers[k] output dim  = 1280 (d_model; vs 2048 after final output_dim proj)
+  # So if distill_*_layer below is null (last layer), set audio_target_dim=2048;
+  # if distill_audio_layer is an intermediate layer, keep audio_target_dim=1280.
+  distill:
+    enabled: false
+    video_target_dim: 1152
+    image_target_dim: 1152
+    audio_target_dim: 1280
+    video_spatial_factor: 4
+    image_spatial_factor: 4
+    temporal_agg_ratio: 3          # VAE 6 latent/s ÷ encoder 2 token/s = 3:1
+    audio_distill_type: d_axis     # d_axis | t_axis
+    distill_proj_type: conv        # conv (iREPA, 默认) | linear (REPA)
+    distill_use_conv3d: false      # conv 模式: Conv3d (true) 或逐帧 Conv2d (false)
+    distill_proj_layers: 2         # conv 层数 (1=单层, 向后兼容)
+    distill_proj_hidden_dim: 256   # 多层隐藏维度 (null=自动 geometric mean)
+    distill_proj_before_agg: true  # true=先投影再时间聚合(新版), false=先聚合再投影(旧版)
+    distill_dim_schedule: fixed    # fixed=所有隐藏层同维(默认), doubling=逐层翻倍(层数自动)
+    distill_use_sampled: false     # false=用latent mean蒸馏(默认), true=用采样后的latent蒸馏
+    audio_proj_type: conv          # 音频投影: "linear" (默认) | "conv"
+    audio_proj_layers: 2           # 音频 conv 层数
+    audio_proj_hidden_dim: 512     # 音频隐藏维度
+
+# ============================================================================
+# 数据配置
+# ============================================================================
+data:
+  train:
+    # # === 方式一：层级式数据混合 yaml（推荐用于多数据集混合训练） ===
+    # # 指定后会忽略 metadata_paths 和 metadata_weights，自动解析权重
+    # data_mixture_yaml: $OMNIVAE_DATA_ROOT/data_v1_mixure.yaml
+
+    # === 方式二：手动指定数据集路径和权重 ===
+    metadata_paths:
+      # train_main: $OMNIVAE_DATA_ROOT/train
+      # train_main: $OMNIVAE_DATA_ROOT/train
+      train_main: $OMNIVAE_DATA_ROOT/train
+    metadata_weights:
+      train_main: 1.0
+
+    # 启用文件路径处理器（直接从 video_path 加载，不使用 bin 打包）
+    use_file_processor: true
+
+    num_frames: *num_frames
+    resolution: *resolution
+    video_frame_sample_rate: *video_frame_sample_rate
+    target_fps: *target_fps
+    audio_sample_rate: *audio_sample_rate
+
+    num_workers: 4
+    prefetch_factor: 2
+
+  val_video:
+    video_dir: $OMNIVAE_DATA_ROOT/val/video
+    num_frames: 121
+    resolution: *resolution
+    video_frame_sample_rate: *video_frame_sample_rate
+    target_fps: *target_fps
+    max_samples: 1000
+    batch_size: 1
+
+  val_audio:
+    audio_dir: $OMNIVAE_DATA_ROOT/val/audio
+    audio_sample_rate: *audio_sample_rate
+    max_duration: 5.0
+    max_samples: 1000
+    batch_size: 1
+
+  val_contrastive:
+    jsonl_paths:
+      vggsound_valid: $OMNIVAE_DATA_ROOT/val/contrastive/vggsound_valid_filtered_original.jsonl
+      ct_nonspeech: $OMNIVAE_DATA_ROOT/val/contrastive/nonspeech_valid_10000_original.jsonl
+      ct_speech: $OMNIVAE_DATA_ROOT/val/contrastive/speech_valid_10000_orig.jsonl
+    num_frames: *num_frames
+    resolution: *resolution
+    video_frame_sample_rate: *video_frame_sample_rate
+    target_fps: *target_fps
+    audio_sample_rate: *audio_sample_rate
+    max_samples: 20000
+    batch_size: 1
+    # 支持单值或列表（如 [64, 256]）；列表会分别独立评估
+    val_segment_num_negatives: [29, 64]
+    val_segment_num_negative_videos: ${model.contrastive.num_negative_videos}
+    val_global_num_negatives: [64, 256]
+
+# ============================================================================
+# 训练配置
+# ============================================================================
+training:
+  max_steps: 200000
+  batch_size: 3
+
+  lr: &lr 1.0e-4
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
+
+  # Per-module learning rates. null = fall back to the global `lr` above.
+  lr_video_vae: null
+  lr_audio_vae: null
+  lr_contrastive_head: null
+  lr_distill_proj: null
+  lr_video_logvar: null
+
+  max_grad_norm: 1.0
+  gradient_accumulation_steps: 1
+  dtype: fp32
+  # 逐模块 dtype（可选，不设则跟随全局 dtype）
+  video_vae_dtype: fp32
+  audio_vae_dtype: fp32
+  contrastive_dtype: bfloat16
+
+  # --- Audio discriminator optimizer (独立 gen/disc, 参考 v23.2.e) ---
+  # lr_disc/disc_betas/disc_weight_decay 仅在 loss.use_audio_disc=true 时生效
+  lr_disc: 1.0e-4
+  disc_betas: [0.9, 0.99]
+  disc_weight_decay: 0.0
+  disc_max_grad_norm: null   # null = 与 max_grad_norm 相同
+  disc_dtype: fp32           # disc 前后向使用的 dtype (建议 fp32)
+
+  # QK-Norm: 对所有 attention 的 Q/K 向量施加 RMSNorm（稳定训练）
+  qk_norm: true
+
+  # 学习率 warmup 步数（线性升温后接 cosine 衰减）
+  warmup_steps: 4000
+
+  # --- Dedicated warmup+cosine schedule for the `video_vae` param group ---
+  # Any of the following set to a non-null value will activate an
+  # independent schedule for video VAE parameters; the clock is offset by
+  # `lr_video_vae_start_step` (defaults to `freeze_video_vae_until_step`
+  # when unset), so with two-stage training the video VAE's warmup+cosine
+  # begins right after the unfreeze step while all other modules keep
+  # following the global schedule.
+  lr_video_vae_warmup_steps: null  # default: same as `warmup_steps`
+  lr_video_vae_total_steps: null   # default: max_steps - freeze_video_vae_until_step
+  lr_video_vae_start_step: null    # default: freeze_video_vae_until_step (0 if not freezing)
+  lr_video_vae_min_ratio: null     # default: 0.0 (cosine floor ratio)
+
+  # --- Dedicated warmup+cosine schedule for the `audio_vae` param group ---
+  # Symmetric to the video_vae block above. When null the audio_vae group
+  # follows the global schedule; when any field is set, the audio_vae group
+  # gets its own warmup+cosine with the clock offset by
+  # `lr_audio_vae_start_step` (defaults to `freeze_audio_vae_until_step`).
+  lr_audio_vae_warmup_steps: null  # default: same as `warmup_steps`
+  lr_audio_vae_total_steps: null   # default: max_steps - freeze_audio_vae_until_step
+  lr_audio_vae_start_step: null    # default: freeze_audio_vae_until_step (0 if not freezing)
+  lr_audio_vae_min_ratio: null     # default: 0.0 (cosine floor ratio)
+
+  # Video VAE gradient checkpointing（用额外计算换取显存节省）
+  gradient_checkpointing: false
+
+  # 是否在视频中随机选择起始位置进行裁剪（数据增强）
+  random_start: false
+
+  use_ema: false
+  ema_decay: 0.999
+
+  log_steps: 3
+  stdout_steps: 10
+  eval_steps: 2000
+  save_steps: 2000
+  max_checkpoints: 5000
+
+# ============================================================================
+# Loss 权重
+# ============================================================================
+loss:
+  # Loss 开关 (true=启用, false=禁用并跳过对应计算)
+  use_video_recon: true
+  use_audio_recon: true
+  use_segment_contrastive: true
+  use_global_contrastive: true
+
+  # 三大组权重 (在单项权重之上的整体缩放)
+  lambda_group_video: 1.0
+  lambda_group_audio: 1.0
+  lambda_group_contrastive: 1.0
+
+  # Video
+  lambda_video_recon: 1.0
+  lambda_video_kl: 1.65e-2  # 由于没有 lpips loss, 所以这边 kl loss 要调小点
+  lambda_video_lpips: 1.0   # 设为 >0（如 0.5 或 1.0）启用 LPIPS 训练损失
+  video_loss_reduction: "sum"  # "sum" (默认): sum over spatial, mean over batch; "mean": mean over all
+
+  # Audio
+  lambda_audio_mel: 1.0
+  lambda_audio_recon: 1.0
+  lambda_audio_kl: 0.5
+
+  # Audio GAN discriminators (LSGAN, 三件套: MPD + MSD + MSSTFTD)
+  # 参考: OmniVAE-codec_with_disc/speechtokenizer/trainer/trainer_with_disc.py
+  # 经验: gen 和 disc 学习率建议差 ~10x (training.lr vs training.lr_disc)
+  use_audio_disc: false
+  audio_disc_start_step: 0             # 从第几步开始激活 disc 训练 + adversarial loss
+  lambda_audio_adv: 1.0                # generator 侧的 adversarial loss 权重
+  lambda_audio_feature_matching: 1.0   # generator 侧的 feature matching loss 权重
+  audio_disc_params:
+    mpd: {}
+    msd: {}
+    mstftd:
+      filters: 32
+      n_ffts: [1024, 2048, 512, 256, 128]
+      hop_lengths: [256, 512, 128, 64, 32]
+      win_lengths: [1024, 2048, 512, 256, 128]
+
+  # Video GAN discriminator (CausalVAE-style 3D PatchGAN, alternating G/D)
+  # 参考: omnivae/models/causalvideovae/model/losses/discriminator.py
+  # 更新策略：step % 2 == 1 且 step >= video_disc_start_step 时走 D 窗口（只更新
+  # disc），其余 step 走 G 窗口（全量 recon+adv loss 更新 generator）。
+  use_video_disc: false
+  video_disc_start_step: 0             # 开始 disc+adv 训练的全局 step
+  lambda_video_adv: 0.5                # generator 侧 -E[D(fake)] 的静态权重
+  video_disc_loss_type: hinge          # hinge | vanilla
+  video_disc_adaptive_weight: false    # true: 走 VQGAN ||∇L_rec||/||∇L_g|| 自适应权重
+  distill_every_steps: false           # true: D-only 步也算 distill loss 并累积到 G 梯度
+  video_disc_params:
+    input_nc: 3
+    ndf: 64
+    n_layers: 3
+    use_actnorm: false
+
+  # Audio-Video Contrastive
+  lambda_segment_contrastive: 1.0
+  lambda_global_contrastive: 1.0
+  global_contrastive_start_steps: 0
+  # Multi-granularity segment contrastive settings (lists must match segment_count length):
+  #   segment_avclip_start_steps: [0, 1000]   # per-granularity training start step
+  #   segment_count_weights: [1.0, 0.5]       # per-granularity loss weight (summed then scaled by lambda_segment_contrastive)
+
+  # Video loss clamp（防止 video recon spike 导致训练不稳定）
+  video_loss_clamp: false
+  video_recon_clamp_max: 8000.0
+  video_lpips_clamp_max: 0.25
+  video_kl_clamp_max: 6000.0
+
+  # 自适应 loss 平衡（以 video_total 为锚点动态缩放 audio / contrastive）
+  adaptive_loss_balance: true
+  adaptive_balance_audio_ratio: 0.5
+  adaptive_balance_contrastive_ratio: 0.5
+
+  # Uncertainty-based adaptive loss balance (Kendall et al., 2018)
+  # 与 adaptive_loss_balance 互斥，同时开启会报错
+  adaptive_loss_balance_by_uncertainty: false
+  uncertainty_warmup_steps: 100  # warmup 步数，收集各任务 loss 均值后初始化 log(sigma^2)
+
+  # Adaptive loss balance v2: EMA-smoothed anchor, scales video/audio/contrastive
+  # group totals so that each matches anchor * ratio_*. Anchor source is
+  # configurable (video_vae | audio_vae | contrastive). Breaks the positive
+  # feedback loop that plagues the v1 instantaneous scheme on spikes.
+  adaptive_loss_balance_v2: false
+  adaptive_anchor_source: video_vae       # video_vae | audio_vae | contrastive
+  adaptive_anchor_ema_decay: 0.99
+  adaptive_anchor_warmup_steps: 200       # in warmup use static lambda_group_* only
+  adaptive_scale_clamp_min: 0.001
+  adaptive_scale_clamp_max: 100.0
+  adaptive_ratio_video: 1.0
+  adaptive_ratio_audio: 1.0
+  adaptive_ratio_contrastive: 1.0
+  # Stage1 (phase-freeze) overrides for adaptive_loss_balance_v2. Any field
+  # left as null falls back to the stage2 value above. Typical use: freeze
+  # video_vae for the first N steps and set anchor=contrastive here so that
+  # audio/contrastive stay balanced while video produces no loss.
+  adaptive_anchor_source_stage1: null     # video_vae | audio_vae | contrastive | null
+  adaptive_ratio_video_stage1: null
+  adaptive_ratio_audio_stage1: null
+  adaptive_ratio_contrastive_stage1: null
+  # Stage2 gradient-balance hybrid: after video_vae unfreeze, switch from
+  # EMA-anchor scaling to VQGAN-style gradient-norm balancing. Optionally
+  # blend the two scales linearly over the first blend_steps updates after
+  # unfreeze to avoid a scale discontinuity. The stage2 ratios fall back to
+  # `gradient_balance_*_ratio` when left null.
+  adaptive_v2_stage2_use_gradient: false
+  adaptive_v2_stage2_blend_steps: 0       # 0 = hard switch at unfreeze
+  gradient_ratio_video_stage2: null       # -> gradient_balance_video_ratio
+  gradient_ratio_audio_stage2: null       # -> gradient_balance_audio_ratio
+
+  # Phase freezing of the video VAE (encoder + decoder). Encoder still runs
+  # forward (so contrastive/audio paths keep latents) but receives no
+  # gradient. After `freeze_video_vae_until_step` steps the VAE is unfrozen
+  # and its parameters are added to the optimizer as a new group
+  # (AdamW state for these params starts at zero).
+  freeze_video_vae: false
+  freeze_video_vae_until_step: 0   # 0 = never unfreeze
+
+  # Phase freezing of the audio VAE (symmetric to video above). Encoder still
+  # runs forward (so contrastive / video paths keep audio latents) but receives
+  # no gradient. After `freeze_audio_vae_until_step` steps the audio VAE is
+  # unfrozen and its parameters are added to the optimizer as a new group
+  # (AdamW state for these params starts at zero).
+  freeze_audio_vae: false
+  freeze_audio_vae_until_step: 0   # 0 = never unfreeze
+
+  # Semantic Distillation (Qwen3-Omni encoders as teacher)
+  # 三种模式 (优先级: semantic_model_path > semantic_api_url + upload_mode > semantic_api_url):
+  #   A. 本地推理: semantic_model_path 指向 Qwen3-Omni 权重目录
+  #   B. 远程共享路径: semantic_api_url 指向服务, 服务端直读文件 (需 NFS)
+  #   C. 远程上传: semantic_api_url + distill_upload_mode: true (跨服务器, 存储不共享)
+  use_semantic_distill: false
+  # semantic_model_path: /path/to/qwen3_avencoder_service  # 模式 A: 本地推理
+  # semantic_api_url: http://encoder-server:9000             # 模式 B/C: 远程服务
+  # distill_upload_mode: false           # true=模式C上传数据, false=模式B发路径
+  # distill_video_gpu_map: "0:0,1:0,2:1,3:1,4:2,5:2,6:3,7:3"  # rank->视频GPU映射
+  # distill_image_gpu_id: 4             # 图像推理 GPU (所有 rank 共用)
+  # distill_audio_gpu_id: 5             # 音频推理 GPU (所有 rank 共用)
+  # distill_num_upload_workers: 6       # 并行上传线程数
+  # distill_processor_path: /path/to/qwen3_omni_model  # Qwen processor 路径 (训练侧 tokenize)
+  encoder_fps: 4
+  encoder_resolution: 256
+  # Teacher encoder layer selection (Mode A / LocalSemanticEncoder only, 1-indexed).
+  # null = 最后一层 (旧行为，audio 输出 dim=2048);
+  # 给定 int 时截取该层 block 输出 (vision 共 27 层 → 1152 dim; audio 共 32 层 → 1280 dim).
+  # 注意与 model.distill.audio_target_dim 对齐。
+  distill_vision_layer: 18
+  distill_audio_layer: 24
+  lambda_distill_image_cosine: 1.0
+  lambda_distill_image_distance: 1.0
+  lambda_distill_video_cosine: 1.0
+  lambda_distill_video_distance: 1.0
+  lambda_distill_audio_d_axis: 120.0
+  lambda_distill_audio_t_axis: 1.0
+  distill_w_hyper: 0.1
+  distill_audio_type: d_axis       # d_axis | t_axis
+  lambda_group_distill: 1.0
+  # iREPA 空间归一化 (作用于 teacher 视觉特征)
+  distill_spatial_norm: true
+  distill_spatial_norm_gamma: 0.6
+  # loss 函数配置
+  distill_margin_cosine: 0.0        # 0 = iREPA/REPA 风格（直接负余弦）; >0 = marginal VF 风格
+  distill_margin_distance: 0.25
+  distill_use_dist_matrix: false    # 是否启用 Distance Matrix Loss
+  # 自适应蒸馏平衡（视频蒸馏对齐视频重建，音频蒸馏对齐音频重建）
+  adaptive_distill_balance: false
+  adaptive_distill_video_ratio: 0.1   # 视频蒸馏 / 视频重建 的目标比例
+  adaptive_distill_audio_ratio: 0.1   # 音频蒸馏 / 音频重建 的目标比例
+
+  mel_loss_kwargs:
+    sample_rate: *audio_sample_rate
+    n_mels: [5, 10, 20, 40, 80, 160, 320]
+    window_lengths: [32, 64, 128, 256, 512, 1024, 2048]
+    weights: [15, 15, 15, 15, 15, 15, 15]  # 每个尺度权重为 15
+    pow: 1.0
+    mel_fmin: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    mel_fmax: [null, null, null, null, null, null, null]
+
+# ============================================================================
+# 输出配置
+# 实际路径由 --tag 参数设置为 exp/{tag}/{log,checkpoints,tensorboard}
+# ============================================================================
+output:
+  exp_root: $OMNIVAE_EXP_ROOT

@@ -1,0 +1,216 @@
+experiment:
+  name: t2i_omnivae
+  # output_dir below is the parent / base directory; omnivae_generation.trainer.zimage_training
+  # ._sync_run_identity auto-appends experiment.name (or the --name override)
+  # as the leaf, and forces wandb.run_name to match. Single source of truth =
+  # experiment.name; never write the leaf manually.
+  output_dir: ./exp/t2i
+
+accelerate:
+  mixed_precision: bf16
+  log_with: tensorboard
+  # Wan2.2 VAE encode + DiT compile both create dynamic shapes the first few
+  # steps; matches the sibling wan22 configs.
+  dynamo_recompile_limit: 8
+  use_stateful_dataloader: true
+  stateful_snapshot_every_n_steps: 1
+
+wandb:
+  base_url: null
+  entity: null
+  project: omnivae-generation
+  # run_name is auto-synced to experiment.name by omnivae_generation.trainer.zimage_training._sync_run_identity
+
+profiler:
+  enabled: true
+  trace_dir: null
+  activities: [cpu, cuda]
+  record_shapes: false
+  profile_memory: false
+  with_stack: true
+  with_flops: false
+  with_modules: false
+  wait: 100
+  warmup: 1
+  active: 3
+  repeat: 1
+  skip_first: 0
+  all_ranks: false
+
+dataset:
+  type: "relaion"
+  root: "data/image/relaion/metadata"
+  base_image_path: "data/image/relaion/images"
+  split: train
+  image_size: 256
+  center_crop: false
+  random_flip: false
+  num_workers: 24
+  prefetch_factor: 16
+  pin_memory: true
+  drop_last: true
+  cache_dir: ".cache/relaion"
+  recaption_prob: 0.8
+
+text_encoder:
+  model_name_or_path: Qwen/Qwen3.5-0.8B
+  local_files_only: true            # rely on HF cache; flip false to allow downloads
+  trust_remote_code: false
+  torch_dtype: bfloat16
+  attn_implementation: sdpa
+  max_sequence_length: 320
+  disable_qwen3_5_fast_path: true
+
+vae:
+  type: omnivae
+  model_name_or_path: checkpoints/omnivae/av_vae/state_dict.pt
+  branch: video
+  use_ema: false
+  qk_norm: auto
+  torch_dtype: bfloat16
+  compile_encode: true
+  compile_encode_fullgraph: false
+  compile_encode_mode: default
+
+scheduler:
+  model_name_or_path: Tongyi-MAI/Z-Image-Turbo
+  subfolder: scheduler
+  local_files_only: true            # rely on HF cache; flip false to allow downloads
+  use_dynamic_shifting: false
+
+transformer:
+  # Wan2.2 VAE compresses 256x256 -> 16x16 latent (scale_factor_spatial=16),
+  # so patch=1 already gives 16*16 = 256 tokens per image (same length as the
+  # FLUX.2 VAE + patch=2 baseline). in_channels matches Wan2.2 z_dim=48.
+  all_patch_size: [1]
+  all_f_patch_size: [1]
+  in_channels: 48
+
+  # ----------------------------------------------------------------------- #
+  # Pick a registered preset to set dim / n_layers / n_heads / n_kv_heads /
+  # n_refiner_layers in one knob. Available presets (see
+  # omnivae_generation.trainer.config.MODEL_SIZE_PRESETS):
+  #   1b   -> dim=1920, n_layers=18, n_heads=15  (~1.0B params)
+  #   2.5b -> dim=2560, n_layers=28, n_heads=20  (~2.5B params)
+  #   5b   -> dim=3072, n_layers=40, n_heads=24  (~5.2B params, Wan2.2-style)
+  #
+  # Override priority (highest wins):
+  #   CLI --size  >  yaml dim/n_layers/...  >  yaml model_size  >  defaults
+  # so any field you write below still wins over the preset.
+  # ----------------------------------------------------------------------- #
+  model_size: 1b
+
+  norm_eps: 1.0e-5
+  qk_norm: true
+  rope_theta: 256.0
+  t_scale: 1000.0
+  use_timestep: true
+  predict_target: v
+  axes_dims: [16, 56, 56]
+  axes_lens: [1024, 512, 512]
+  compile_model: true
+  attention_backend: null
+
+train:
+  seed: 42
+  train_text_encoder: false
+  gradient_checkpointing: true
+  allow_tf32: true
+  per_device_batch_size: 32
+  gradient_accumulation_steps: 1
+  max_train_steps: 1600000
+  learning_rate: 1.0e-4
+  scale_lr: false
+  optimizer: Hybrid
+  lr_scheduler: cosine
+  lr_warmup_steps: 2000
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_weight_decay: 0.01
+  adam_epsilon: 1.0e-8
+  muon_momentum: 0.95
+  muon_nesterov: true
+  muon_weight_decay: 0.01
+  muon_eps: 1.0e-8
+  muon_ns_steps: 5
+  muon_ns_coefficients: null
+  muon_adjust_lr_fn: "match_rms_adamw"
+  muon_shard_across_ranks: 8
+  muon_max_inflight_buckets: 1
+  max_grad_norm: 1.0
+  caption_dropout_prob: 0.1
+  weighting_scheme: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  mode_scale: 1.29
+  snapshot_checkpointing_steps: 5000
+  snapshots_total_limit: 1000
+  persistent_checkpointing_steps: 50000
+  persistent_total_limit: null
+  validation_steps: 5000
+  # Sanity-check the swapped VAE every 5k steps: encode->decode a few real
+  # images with the deterministic posterior mode (matches infer.py's default).
+  vae_validation_steps: 5000
+  vae_validation_num_samples: 4
+  vae_validation_sample_mode: argmax
+  validation_num_inference_steps: 50
+  validation_guidance_scale: 3.0
+  validation_prompts:
+    - "a high-quality photo of a goldfish"
+    - "a high-quality photo of a tiger shark"
+    - "a high-quality photo of an ostrich"
+    - "a high-quality photo of a tabby cat"
+    - "A horse riding an astronaut"
+    - |
+      A wide image taken with a phone of a glass whiteboard, in a room overlooking the Bay Bridge. The field of view shows a woman writing, sporting a tshirt wiith a large OpenAI logo. The handwriting looks natural and a bit messy, and we see the photographer's reflection.
+
+      The text reads:
+
+      (left)
+      "Transfer between Modalities:
+
+      Suppose we directly model
+      p(text, pixels, sound) [equation]
+      with one big autoregressive transformer.
+
+      Pros:
+      * image generation augmented with vast world knowledge
+      * next-level text rendering
+      * native in-context learning
+      * unified post-training stack
+
+      Cons:
+      * varying bit-rate across modalities
+      * compute not adaptive"
+
+      (Right)
+      "Fixes:
+      * model compressed representations
+      * compose autoregressive prior with a powerful decoder"
+
+      On the bottom right of the board, she draws a diagram:
+      "tokens -> [transformer] -> [diffusion] -> pixels"
+    - |
+      A square image containing a 4 row by 4 column grid containing 16 objects on a white background. Go from left to right, top to bottom. Here's the list:
+      1. a blue star
+      2. red triangle
+      3. green square
+      4. pink circle
+      5. orange hourglass
+      6. purple infinity sign
+      7. black and white polka dot bowtie
+      8. tiedye "42"
+      9. an orange cat wearing a black baseball cap
+      10. a map with a treasure chest
+      11. a pair of googly eyes
+      12. a thumbs up emoji
+      13. a pair of scissors
+      14. a blue and white giraffe
+      15. the word "OpenAI" written in cursive
+      16. a rainbow-colored lightning bolt
+    - |
+      A candid paparazzi-style photo of Karl Marx hurriedly walking through the parking lot of the Mall of America, glancing over his shoulder with a startled expression as he tries to avoid being photographed. He's clutching multiple glossy shopping bags filled with luxury goods. His coat flutters behind him in the wind, and one of the bags is swinging as if he's mid-stride. Blurred background with cars and a glowing mall entrance to emphasize motion. Flash glare from the camera partially overexposes the image, giving it a chaotic, tabloid feel.
+  resume_from_checkpoint: latest
+  log_every_steps: 10
+  manual_gc: true
+  manual_gc_every_steps: 1000

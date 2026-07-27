@@ -1,0 +1,46 @@
+# Minimal package list. Most heavy deps (torch, torchaudio, torchvision) are
+# expected to come from the active LAION_BASHRC env (mirrors
+# eval_versebench_t2av.sh's expectation). Install the rest with:
+#
+#   pip install -r generation/infer/t2av/my_eval/requirements_my_eval.txt
+#   pip install -e generation/evaluation/models/imagebind --no-deps
+#   pip install -e generation/evaluation/metrics/av_quality/av_bench --no-deps
+#
+# Some packages may already be present in the active env.
+
+# --- Audio I/O / DSP -------------------------------------------------
+soundfile
+librosa
+torchaudio
+pyloudnorm
+python_speech_features  # SyncNet MFCC dependency
+audiotools          # optional; falls back to pyloudnorm
+torchcodec          # used by MOVA eval_audio_amplitude (if available)
+
+# --- Video I/O -------------------------------------------------------
+av                  # PyAV; required by av_sync_imagebind decoding fallback
+opencv-python-headless==4.10.0.84  # MOVA av_align_score / video_aesthetic dependencies
+moviepy             # video_aesthetic.py frame iteration
+pyiqa               # MusiQ inferencer
+scenedetect>=0.5.6,<0.6  # SyncNet needs legacy scenedetect.video_manager
+
+# --- ImageBind, CLAP, ASR --------------------------------------------
+einops
+laion-clap          # CLAP audio-text similarity (MOVA eval_audio_is_clap)
+transformers>=5.3.0  # PE-AV support lives in transformers.models.pe_audio_video
+timm>=1.0.0         # PE-AV transformers implementation
+panns-inference     # PANNs Cnn14 used by audio_is + audio_dnsmos
+
+# --- DNSMOS (ONNX) ---------------------------------------------------
+onnxruntime-gpu     # use 'onnxruntime' if CUDA support is unavailable
+
+# --- Verse-Bench AS + audiobox-aesthetics ----------------------------
+aesthetic-predictor-v2-5
+audiobox-aesthetics
+
+# --- Misc utilities --------------------------------------------------
+tqdm
+omegaconf           # Verse-Bench syncformer cfg loader (only needed if using Verse-Bench paths)
+matplotlib          # required by MOVA av_align_score visualisation imports
+einops
+colorlog            # MOVA extract_video module imports this

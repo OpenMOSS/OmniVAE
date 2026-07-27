@@ -1,0 +1,191 @@
+experiment:
+  name: t2a_omnivae
+  # output_dir below is the parent / base directory; trainer auto-appends
+  # experiment.name (or the --name override) as the leaf.
+  output_dir: ./exp/t2a
+
+accelerate:
+  mixed_precision: bf16
+  log_with: tensorboard
+  dynamo_recompile_limit: 32
+  use_stateful_dataloader: true
+  stateful_snapshot_every_n_steps: 1
+
+wandb:
+  base_url: null
+  entity: null
+  project: omnivae-generation
+  # run_name is auto-synced to experiment.name by omnivae_generation.trainer.zimage_training._sync_run_identity
+
+profiler:
+  enabled: true
+  trace_dir: null
+  activities: [cpu, cuda]
+  record_shapes: false
+  profile_memory: false
+  with_stack: true
+  with_flops: false
+  with_modules: false
+  wait: 100
+  warmup: 1
+  active: 3
+  repeat: 1
+  skip_first: 0
+  all_ranks: false
+
+dataset:
+  type: audio_jsonl
+  dataset_base_path: .
+  # Multi-source weighted sampling. Each step picks a source ~ Categorical(weight)
+  # then a uniform sample within that source (with replacement). Old single-source
+  # `metadata_paths: [...]` still works and is auto-wrapped as one legacy source.
+  sources:
+    - name: emilia_en
+      kind: tts                       # text + audio_path
+      weight: 2.0                     # TTS : TTA = 2 : 1; two TTA sources split the 1.0 evenly
+      path: data/audio/train/tts.jsonl
+    - name: tta_from_video
+      kind: tta                       # caption_en (list) + audio_path (.mp4 ok); empty list -> skipped, non-empty -> random pick per __getitem__
+      weight: 0.75
+      path: data/audio/train/tta_from_video.jsonl
+      prompt_field: caption_en
+    - name: tta_freesound_pixbay
+      kind: tta
+      weight: 0.25
+      path: data/audio/train/tta_effects.jsonl
+      prompt_field: caption_en
+  sample_rate: 48000
+  num_audio_samples: 1440000
+  max_num_audio_samples: 1440000      # max 30s @ 48kHz; longer audio is cropped to the first 30s
+  mono: true
+  append_duration_suffix: true        # both kinds append "duration: X.Xs" to the prompt
+  duration_precision: 1
+  task_prefix_enabled: true           # wrap prompts with a randomly-picked instruction template (Speak / Generate sound effects of / ...) per kind
+  num_workers: 8
+  prefetch_factor: 2
+  pin_memory: true
+  drop_last: true
+  max_samples: null
+
+text_encoder:
+  model_name_or_path: Qwen/Qwen3.5-0.8B
+  local_files_only: true
+  trust_remote_code: false
+  torch_dtype: bfloat16
+  attn_implementation: sdpa
+  max_sequence_length: 512
+  cache_enabled: false
+
+audio_vae:
+  type: omnivae
+  model_path: checkpoints/omnivae/av_vae/state_dict.pt
+  branch: audio
+  use_ema: false
+  hop_length: 960
+  latent_channels: 128
+  torch_dtype: float32
+  compile_encode: true
+
+scheduler:
+  model_name_or_path: Tongyi-MAI/Z-Image-Turbo
+  subfolder: scheduler
+  local_files_only: true
+  use_dynamic_shifting: false
+
+transformer:
+  all_patch_size: [1]
+  all_f_patch_size: [1]
+  in_channels: 128
+  dim: 1920
+  n_layers: 18
+  n_refiner_layers: 2
+  n_heads: 15
+  n_kv_heads: 15
+  norm_eps: 1.0e-5
+  qk_norm: true
+  rope_theta: 256.0
+  t_scale: 1000.0
+  axes_dims: [16, 56, 56]
+  axes_lens: [2048, 16, 16]
+  compile_model: true
+  attention_backend: null
+
+train:
+  seed: 42
+  optimizer: hybrid
+  train_text_encoder: false
+  gradient_checkpointing: true
+  allow_tf32: true
+  per_device_batch_size: 8
+  gradient_accumulation_steps: 1
+  max_train_steps: 1000000
+  learning_rate: 1.0e-4
+  scale_lr: false
+  lr_scheduler: cosine
+  lr_warmup_steps: 2000
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_weight_decay: 0.01
+  adam_epsilon: 1.0e-8
+  muon_momentum: 0.95
+  muon_nesterov: true
+  muon_weight_decay: 0.01
+  muon_eps: 1.0e-8
+  muon_ns_steps: 5
+  muon_ns_coefficients: null
+  muon_adjust_lr_fn: match_rms_adamw
+  muon_shard_across_ranks: 8
+  muon_max_inflight_buckets: 1
+  max_grad_norm: 1.0
+  caption_dropout_prob: 0.2
+  weighting_scheme: none
+  logit_mean: 0.0
+  logit_std: 1.0
+  mode_scale: 1.29
+  checkpointing_steps: 5000
+  checkpoints_total_limit: 100
+  persistent_checkpointing_steps: 50000
+  persistent_total_limit: null
+  validation_steps: 5000
+  vae_validation_steps: 5000
+  resume_from_checkpoint: latest
+  log_every_steps: 10
+  manual_gc: true
+  manual_gc_every_steps: 1000
+
+validation:
+  prompt_sets:
+    - name: basetts_valid
+      task_kind: tts                  # per-entry "type" is "Questions"/"Statements"/... (subtype labels), so set the task pool explicitly here
+      path: examples/eval/t2a_tts_basetts_sample.jsonl
+      format: jsonl
+      text_field: text
+      type_field: type
+      index_field: index
+      wer_normalization: simple
+    # - name: seedtts_en
+    #   task_kind: tts                  # metalst loader hardcodes per-entry type to "all"
+    #   path: data/speech_valid/seedtts_testset/en/meta.lst
+    #   format: metalst
+    #   wer_normalization: seedtts
+    - name: tta_general_en
+      task_kind: tta                  # redundant with per-entry "type": "tta" but explicit is safer
+      path: examples/eval/t2a_tta_general_en.jsonl
+      format: jsonl
+      text_field: text
+      type_field: type
+      index_field: index
+      compute_wer: false              # environmental audio: skip Whisper / WER scoring
+  num_prompts: null
+  duration_seconds: 30.0
+  num_inference_steps: 50
+  guidance_scale: 2.0
+  cfg_normalization: false
+  num_log_per_type: 2
+  seed_offset: 7
+  wer:
+    enabled: true
+    model_path: openai/whisper-large-v3   # resolved through HF cache; flip local_files_only to true to forbid downloads
+    local_files_only: false
+    language: en
+    max_log_per_set: 20

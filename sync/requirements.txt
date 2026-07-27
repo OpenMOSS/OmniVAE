@@ -1,0 +1,22 @@
+# Install PyTorch wheels from the index matching your CUDA version when needed:
+#   https://pytorch.org/get-started/locally/
+torch>=2.1
+torchvision>=0.16
+torchaudio>=2.1
+
+# OmniVAE-Sync depends on the sibling OmniVAE package.
+# Install it first with: pip install -e ../OmniVAE
+omnivae>=0.1.0
+
+numpy>=1.24,<2.0
+omegaconf>=2.1
+einops>=0.7
+tqdm>=4.66
+scipy>=1.10
+scikit-learn>=1.3
+matplotlib>=3.7
+pandas>=2.0
+tensorboard>=2.14
+wandb>=0.16
+timm>=0.9
+requests>=2.31
