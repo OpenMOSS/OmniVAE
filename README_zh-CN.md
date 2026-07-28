@@ -3,7 +3,7 @@
 [English](README.md) | 简体中文
 
 [![项目主页](https://img.shields.io/badge/Project-Page-blue)](https://openmoss.github.io/OmniVAE.github.io/)
-[![论文](https://img.shields.io/badge/Paper-arXiv-b31b1b.svg)](https://arxiv.org/abs/2607.00000)
+[![论文](https://img.shields.io/badge/Paper-arXiv-b31b1b.svg)](https://arxiv.org/abs/2607.23855)
 [![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Models%20%26%20Assets-yellow)](https://huggingface.co/OpenMOSS-Team/OmniVAE)
 [![许可证](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
 
@@ -167,15 +167,15 @@ OmniVAE/
 
 ## 引用
 
-如果 OmniVAE 对你的研究有帮助，欢迎引用。下面是暂用的 BibTeX，论文正式发布后会更新链接和完整信息。
+如果 OmniVAE 对你的研究有帮助，欢迎使用下面的 BibTeX 引用。
 
 ```bibtex
 @article{omnivae2026,
   title   = {OmniVAE: A Unified Audio-Video Variational Autoencoder for Multimodal Generation},
   author  = {Zhan, Jun and Contributors},
-  journal = {arXiv preprint arXiv:2607.00000},
+  journal = {arXiv preprint arXiv:2607.23855},
   year    = {2026},
-  url     = {https://arxiv.org/abs/2607.00000}
+  url     = {https://arxiv.org/abs/2607.23855}
 }
 ```
 

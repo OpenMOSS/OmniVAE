@@ -3,7 +3,7 @@
 English | [简体中文](README_zh-CN.md)
 
 [![Project Page](https://img.shields.io/badge/Project-Page-blue)](https://openmoss.github.io/OmniVAE.github.io/)
-[![Paper](https://img.shields.io/badge/Paper-arXiv-b31b1b.svg)](https://arxiv.org/abs/2607.00000)
+[![Paper](https://img.shields.io/badge/Paper-arXiv-b31b1b.svg)](https://arxiv.org/abs/2607.23855)
 [![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Models%20%26%20Assets-yellow)](https://huggingface.co/OpenMOSS-Team/OmniVAE)
 [![License](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
 
@@ -193,16 +193,15 @@ For module-specific details, use the documentation under [`vae/`](vae/),
 
 ## Citation
 
-If you find OmniVAE useful, please cite it with the temporary entry below. The
-paper URL and final citation will be updated after the paper is available.
+If you find OmniVAE useful, please cite it with the entry below.
 
 ```bibtex
 @article{omnivae2026,
   title   = {OmniVAE: A Unified Audio-Video Variational Autoencoder for Multimodal Generation},
   author  = {Zhan, Jun and Contributors},
-  journal = {arXiv preprint arXiv:2607.00000},
+  journal = {arXiv preprint arXiv:2607.23855},
   year    = {2026},
-  url     = {https://arxiv.org/abs/2607.00000}
+  url     = {https://arxiv.org/abs/2607.23855}
 }
 ```
 
