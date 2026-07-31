@@ -191,17 +191,29 @@ Each major component also contains its own README and detailed documentation.
 For module-specific details, use the documentation under [`vae/`](vae/),
 [`generation/`](generation/), and [`sync/`](sync/).
 
+## Acknowledgements
+
+OmniVAE builds on these excellent open-source projects, and we thank their
+authors:
+
+- [Open-Sora-Plan](https://github.com/PKU-YuanGroup/Open-Sora-Plan) — codebase
+- [Wan2.2](https://github.com/Wan-Video/Wan2.2) — video VAE
+- [HunyuanVideo-Foley](https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley) — audio VAE
+
 ## Citation
 
 If you find OmniVAE useful, please cite it with the entry below.
 
 ```bibtex
-@article{omnivae2026,
-  title   = {OmniVAE: A Unified Audio-Video Variational Autoencoder for Multimodal Generation},
-  author  = {Zhan, Jun and Contributors},
-  journal = {arXiv preprint arXiv:2607.23855},
-  year    = {2026},
-  url     = {https://arxiv.org/abs/2607.23855}
+@article{zhan2026omnivae,
+  title         = {OmniVAE: An Audio-Video VAE with Cross-Modal Alignment for Joint Generation},
+  author        = {Zhan, Jun and Yang, Chen and Gong, Yitian and others},
+  journal       = {arXiv preprint arXiv:2607.23855},
+  year          = {2026},
+  eprint        = {2607.23855},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.SD},
+  url           = {https://arxiv.org/abs/2607.23855}
 }
 ```
 

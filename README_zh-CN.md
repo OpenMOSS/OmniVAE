@@ -165,17 +165,28 @@ OmniVAE/
 
 更多细节可以直接查看 [`vae/`](vae/)、[`generation/`](generation/) 和 [`sync/`](sync/) 目录下的文档。
 
+## 致谢
+
+OmniVAE 的实现参考了以下优秀的开源项目，感谢它们的作者：
+
+- [Open-Sora-Plan](https://github.com/PKU-YuanGroup/Open-Sora-Plan)：代码框架
+- [Wan2.2](https://github.com/Wan-Video/Wan2.2)：视频 VAE
+- [HunyuanVideo-Foley](https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley)：音频 VAE
+
 ## 引用
 
 如果 OmniVAE 对你的研究有帮助，欢迎使用下面的 BibTeX 引用。
 
 ```bibtex
-@article{omnivae2026,
-  title   = {OmniVAE: A Unified Audio-Video Variational Autoencoder for Multimodal Generation},
-  author  = {Zhan, Jun and Contributors},
-  journal = {arXiv preprint arXiv:2607.23855},
-  year    = {2026},
-  url     = {https://arxiv.org/abs/2607.23855}
+@article{zhan2026omnivae,
+  title         = {OmniVAE: An Audio-Video VAE with Cross-Modal Alignment for Joint Generation},
+  author        = {Zhan, Jun and Yang, Chen and Gong, Yitian and others},
+  journal       = {arXiv preprint arXiv:2607.23855},
+  year          = {2026},
+  eprint        = {2607.23855},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.SD},
+  url           = {https://arxiv.org/abs/2607.23855}
 }
 ```
 
