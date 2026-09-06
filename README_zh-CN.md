@@ -7,6 +7,10 @@
 [![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Models%20%26%20Assets-yellow)](https://huggingface.co/OpenMOSS-Team/OmniVAE)
 [![许可证](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
 
+**音视频统一编码、重建与联合生成。**
+
+**从这里开始：** [快速开始](#快速开始) · [安装说明](docs/installation.md) · [模型与资源](https://huggingface.co/OpenMOSS-Team/OmniVAE) · [工作流](#常用工作流) · [文档](#文档)
+
 <p align="center">
   <a href="assets/architecture/arch.pdf">
     <img src="assets/architecture/arch.png" alt="OmniVAE 架构图" width="100%">

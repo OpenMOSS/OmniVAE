@@ -7,6 +7,10 @@ English | [简体中文](README_zh-CN.md)
 [![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Models%20%26%20Assets-yellow)](https://huggingface.co/OpenMOSS-Team/OmniVAE)
 [![License](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
 
+**Encode, reconstruct, and jointly generate audio and video.**
+
+**Start here:** [Quick start](#quick-start) · [Installation](docs/installation.md) · [Models and assets](https://huggingface.co/OpenMOSS-Team/OmniVAE) · [Workflows](#common-workflows) · [Documentation](#documentation)
+
 <p align="center">
   <a href="assets/architecture/arch.pdf">
     <img src="assets/architecture/arch.png" alt="OmniVAE architecture" width="100%">
