@@ -58,7 +58,7 @@ def check_if_file_exists_else_download(path, fname2link=FNAME2LINK, chunk_size=1
         if link is None:
             raise ValueError(f'Cant find the checkpoint file: {path}.',
                              f'Please download it manually and ensure the path exists.')
-        with requests.get(fname2link[path.name], stream=True) as r:
+        with requests.get(fname2link[path.name], stream=True, timeout=30) as r:
             total_size = int(r.headers.get('content-length', 0))
             with tqdm(total=total_size, unit='B', unit_scale=True) as pbar:
                 with open(path, 'wb') as f:
